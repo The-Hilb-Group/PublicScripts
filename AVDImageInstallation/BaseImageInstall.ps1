@@ -393,6 +393,13 @@ function Install-ImageRight {
     Install-Net48
     Install-Web2View
     Install-WorkSmart
+
+    $path = 'C:\Program Files (x86)\ImageRight'
+    $acl = Get-Acl -Path $path
+    $user = New-Object -TypeName 'System.Security.Principal.SecurityIdentifier' -ArgumentList @([System.Security.Principal.WellKnownSidType]::AuthenticatedUserSid, $null)
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($user, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+    $acl.SetAccessRule($rule)
+    Set-Acl -Path $path -AclObject $acl
 }
 
 function Install-MSIXCert {
@@ -419,6 +426,13 @@ function Install-BenefitPoint {
     )
 
     Invoke-DownloadAndStartProcess -DownloadURL $DownloadURL -FileName 'eStatement.msi' -Arguments '/qn'
+
+    $path = 'C:\Program Files (x86)\Vertafore'
+    $acl = Get-Acl -Path $path
+    $user = New-Object -TypeName 'System.Security.Principal.SecurityIdentifier' -ArgumentList @([System.Security.Principal.WellKnownSidType]::AuthenticatedUserSid, $null)
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($user, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+    $acl.SetAccessRule($rule)
+    Set-Acl -Path $path -AclObject $acl
 }
 
 <#
@@ -560,6 +574,24 @@ function Install-Nasa {
     }
 }
 
+function Install-SnippingTool {
+    param(
+        [string]$DownloadURL = 'http://tlu.dl.delivery.mp.microsoft.com/filestreamingservice/files/da8af8a4-78a0-4196-b168-a41ce4fc8bb4?P1=1718659810&P2=404&P3=2&P4=LRNiFO3bOR8fAN4XcrBaJ%2bQ0Gj%2faivj0Ol%2bPlmNcchOfKEn3XKosuT8FE9rjmJwW3l2SFoSYXtyAy6CdUCR8MA%3d%3d',
+        [string]$FileName = 'Microsoft.ScreenSketch_2022.2404.40.0_neutral_~_8wekyb3d8bbwe.Msixbundle'
+    )
+    $ProgressPreference = 'SilentlyContinue'
+    $TempFilePath = Get-TempFilePath -FileName $FileName
+    Invoke-WebRequest -Uri $DownloadURL -OutFile $TempFilePath
+    $ProgressPreference = 'Continue' 
+
+    DISM.EXE /Online /Add-ProvisionedAppxPackage /PackagePath:$TempFilePath /SkipLicense
+}
+
+function Install-Dialpad {
+    $DownloadURL = "https://storage.googleapis.com/dialpad_native/x64/DialpadSetup_x64.msi"
+    Invoke-DownloadAndStartProcess -DownloadURL $DownloadURL -FileName 'DialpadSetup_x64.msi' -Arguments '/qn'
+}
+
 function Repair-Winget {
     ##*===============================================
     ##* Find Latest Version of Winget
@@ -626,65 +658,68 @@ function Remove-ClassicTeams {
 
 Enable-WindowsOptionalFeature -Online -FeatureName 'NetFx3'
 
-Write-Host "Installing Chocolatey"
+Write-Host 'Installing Chocolatey'
 Install-Chocolatey
 
 
-Write-Host "Installing Chocolatey Packages"
+Write-Host 'Installing Chocolatey Packages'
 Install-ChocoPackages -Packages @('googlechrome', 'notepadplusplus', '7zip', 'vlc', 'powerbi')
 
-Write-Host "Installing Adobe Acrobat"
+Write-Host 'Installing Adobe Acrobat'
 Install-AdobeAcrobat
 
-Write-Host "Installing AMS360"
+Write-Host 'Installing AMS360'
 Install-AMS360
 
-Write-Host "Istalling ImageRight"
+Write-Host 'Istalling ImageRight'
 Install-ImageRight
 
-Write-Host "Installing LastPass"
+Write-Host 'Installing LastPass'
 Install-LastPass
 
-Write-Host "Installing MSIX Cert"
+Write-Host 'Installing MSIX Cert'
 Install-MSIXCert
 
-Write-Host "Installing TransactNow"
+Write-Host 'Installing TransactNow'
 Install-TransactNow
 
-Write-Host "Installing Power Automate"
+Write-Host 'Installing Power Automate'
 Install-PowerAutomate
 
-Write-Host "Installing BenefitPoint"
+Write-Host 'Installing BenefitPoint'
 Install-BenefitPoint
 
-Write-Host "Installing Claros"
+Write-Host 'Installing Claros'
 Install-Claros
 
-Write-Host "Installing Cobra"
+Write-Host 'Installing Cobra'
 Install-Cobra
 
-Write-Host "Installing Producer Plus"
+Write-Host 'Installing Producer Plus'
 Install-ProducerPlus
 
-Write-Host "Installing PSQL"
+Write-Host 'Installing PSQL'
 Install-PSQL
 
-Write-Host "Installing NASA"
+Write-Host 'Installing NASA'
 Install-Nasa
 
-Write-Host "Removing Classic Teams"
+Write-Host 'Removing Classic Teams'
 Remove-ClassicTeams
 
-Write-Host "Removing Quick Assist"
+Write-Host 'Removing Quick Assist'
 Remove-QuickAssist
+
+#Write-Host 'Adding Snipping Tool'
+#Install-SnippingTool
 
 #Write-Host "Repairing Winget"
 #Repair-Winget
 
-Write-Host "Disabling Windows Update Service"
+Write-Host 'Disabling Windows Update Service'
 Set-Service wuauserv -StartupType Disabled
 
-Write-Host "Setting Time Zone to Eastern Standard Time"
+Write-Host 'Setting Time Zone to Eastern Standard Time'
 Set-TimeZone -Name 'Eastern Standard Time'
 
 #EndRegion
