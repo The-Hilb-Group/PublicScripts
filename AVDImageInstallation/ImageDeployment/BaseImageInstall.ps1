@@ -329,8 +329,13 @@ function Add-ExtensionPolicy {
     $Value = "$ExtensionID;$UpdateURL"
 
     # Read existing entries
-    $ExistingProps = Get-ItemProperty -Path $RegPath -ErrorAction SilentlyContinue | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name
-    $ExistingNumbers = $ExistingProps | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ }
+    $ExistingItem = Get-ItemProperty -Path $RegPath -ErrorAction SilentlyContinue
+
+    if ($null -ne $ExistingItem) {
+        $ExistingProps = $ExistingItem | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name
+        $ExistingNumbers = $ExistingProps | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ }
+    }
+
 
     # Check for duplicates
     $Duplicate = $false
