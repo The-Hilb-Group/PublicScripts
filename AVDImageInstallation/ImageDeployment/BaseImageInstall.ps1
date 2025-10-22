@@ -1,31 +1,5 @@
 <#
 .SYNOPSIS
-A script to install various software components including Adobe Acrobat, AMS360, .NET Framework 4.8, Microsoft Edge WebView2 Runtime, and WorkSmart.
-
-.DESCRIPTION
-This script contains functions to install various software components. Each function downloads the necessary files from the provided URLs and then installs the software. Some functions also check if the software is already installed and skip the installation if it is.
-
-The script contains the following functions:
-- Install-AdobeAcrobat: Installs Adobe Acrobat.
-- Install-AMS360: Installs AMS360.
-- Install-Net48: Installs .NET Framework 4.8.
-- Install-Web2View: Installs Microsoft Edge WebView2 Runtime.
-- Install-WorkSmart: Installs WorkSmart.
-
-.EXAMPLE
-To use the functions in the script, you can dot-source the script and then call the functions. For example:
-
-. .\script.ps1
-Install-AdobeAcrobat
-Install-AMS360
-Install-Net48
-Install-Web2View
-Install-WorkSmart
-
-This will install all the software components.
-
-<#
-.SYNOPSIS
 Generates a temporary file path for a given file name.
 
 .DESCRIPTION
@@ -90,150 +64,6 @@ function Invoke-DownloadAndStartProcess {
 
 <#
 .SYNOPSIS
-Installs Chocolatey on the system.
-
-.DESCRIPTION
-This function installs Chocolatey, a package manager for Windows. It does this by setting the execution policy to bypass for the current process, and then invoking the Chocolatey installation script from 'https://chocolatey.org/install.ps1'.
-
-.EXAMPLE
-Install-Chocolatey
-
-This will install Chocolatey on the system.
-
-.NOTES
-The function sets the execution policy to bypass for the current process. This means that the execution policy will be reset to its previous value when the current process exits.
-#>
-function Install-Chocolatey {
-    Set-ExecutionPolicy Bypass -Scope Process -Force
-    Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
-}
-
-<#
-.SYNOPSIS
-Installs a list of packages using Chocolatey.
-
-.DESCRIPTION
-This function takes an array of package names and installs each one using Chocolatey. It forces the installation and automatically confirms all prompts.
-
-.PARAMETER Packages
-An array of package names to install.
-
-.EXAMPLE
-Install-ChocoPackages -Packages @("git", "nodejs")
-
-This will install git and nodejs using Chocolatey.
-
-.NOTES
-Chocolatey must be installed on the system for this function to work.
-#>
-function Install-ChocoPackages {
-    param (
-        [string[]]$Packages
-    )
-
-    foreach ($package in $Packages) {
-        choco install $package -y -Force
-    }
-}
-
-<#
-.SYNOPSIS
-Installs Adobe Acrobat.
-
-.DESCRIPTION
-This function downloads Adobe Acrobat from the provided URL, extracts the downloaded file, downloads a transform file, and then installs Adobe Acrobat using the setup file and the transform file.
-
-.PARAMETER AdobeAcrobatWebURL
-The URL from which to download Adobe Acrobat.
-
-.PARAMETER AdobeTransformURL
-The URL from which to download the transform file.
-
-.EXAMPLE
-Install-AdobeAcrobat
-
-This will install Adobe Acrobat.
-
-.NOTES
-The function waits for the installation process to complete before returning.
-#>
-function Install-AdobeAcrobat {
-    param (
-        [string]$AdobeAcrobatWebURL = 'https://trials.adobe.com/AdobeProducts/APRO/Acrobat_HelpX/win32/Acrobat_DC_Web_x64_WWMUI.zip',
-        [string]$AdobeTransformURL = 'https://eusthginfrastructure.blob.core.windows.net/thg-avd-deployment-scripts/AVD_Image_Deployments/AcroPro.mst'
-    )
-    $TempFilePath = Get-TempFilePath -FileName 'AdobeAcrobatWebURL.zip'
-    $TempDirectory = (Split-Path -Path $TempFilePath -Parent)
-    $AcrobatPath = "$TempDirectory\Adobe Acrobat"
-
-    # Download the file
-    Invoke-WebRequest -Uri $AdobeAcrobatWebURL -OutFile $TempFilePath
-
-    # Extract the file
-    Expand-Archive -Path $TempFilePath -DestinationPath $TempDirectory -Force
-
-    # Download transformFile
-    Invoke-WebRequest -Uri $AdobeTransformURL -OutFile "$AcrobatPath\Transforms\AcroPro.mst"
-
-    # Install Adobe Acrobat
-    Start-Process -FilePath "$AcrobatPath\setup.exe" -ArgumentList '/sAll /rs /msi  EULA_ACCEPT=YES LANG_LIST=en_US UPDATE_MODE=0 DISABLE_ARM_SERVICE_INSTALL=1 ADD_THUMBNAILPREVIEW=YES' -Wait
-}
-
-<#
-.SYNOPSIS
-Installs LastPass using the specified LastPass installer URL.
-
-.DESCRIPTION
-The Install-LastPass function downloads and installs LastPass on the local machine using the LastPass installer URL provided as a parameter. By default, it uses the LastPassURL "https://download.cloud.lastpass.com/windows_installer/LastPassInstaller.msi".
-
-.PARAMETER LastPassURL
-Specifies the URL of the LastPass installer. If not provided, the default URL will be used.
-
-.EXAMPLE
-Install-LastPass -LastPassURL "https://example.com/lastpassinstaller.msi"
-Downloads and installs LastPass using the specified LastPass installer URL.
-#>
-function Install-LastPass {
-    param (
-        [string]$LastPassURL = 'https://download.cloud.lastpass.com/windows_installer/LastPassInstaller.msi'
-    )
-    Invoke-DownloadAndStartProcess -DownloadURL $LastPassURL -FileName 'LastPassInstaller.msi' -Arguments 'ALLUSERS=1 ADDLOCAL=ExplorerExtension,ChromeExtension,FirefoxExtension,EdgeExtension NODISABLEIEPWMGR=1 NODISABLECHROMEPWMGR=1 /qn'
-}
-
-<#
-.SYNOPSIS
-Installs AMS360.
-
-.DESCRIPTION
-This function downloads AMS360 from the provided URL and then installs it.
-
-.PARAMETER AMS360WebURL
-The URL from which to download AMS360.
-
-.EXAMPLE
-Install-AMS360
-
-This will install AMS360.
-
-.NOTES
-The function uses the Invoke-DownloadAndStartProcess function to download and install AMS360.
-#>
-function Install-AMS360 {
-    param (
-        [string]$AMS360WebURL = 'https://eusthginfrastructure.blob.core.windows.net/thg-remediation-scripts/AMS360ClientInstallerRev11.msi'
-    )
-    Invoke-DownloadAndStartProcess -DownloadURL $AMS360WebURL -FileName 'AMS360ClientInstallerRev11.msi' -Arguments '/qn'
-
-    if (Test-Path -Path 'C:\users\Public\Desktop\Install TransactNow.url') {
-        Remove-Item -Path 'C:\users\Public\Desktop\Install TransactNow.url' -Force
-    }
-    if (Test-Path -Path 'C:\users\Public\Desktop\ImageRight Connect 7.0.106.1787.lnk') {
-        Remove-Item -Path 'C:\users\Public\Desktop\ImageRight Connect 7.0.106.1787.lnk' -Force
-    }
-}
-
-<#
-.SYNOPSIS
 Installs .NET Framework 4.8.
 
 .DESCRIPTION
@@ -287,6 +117,129 @@ function Install-Web2View {
         return
     }
     Invoke-DownloadAndStartProcess -DownloadURL $DownloadURL -FileName 'MicrosoftEdgeWebView2RuntimeInstallerX86.exe' -Arguments '/silent /install'
+}
+
+<#
+.SYNOPSIS
+Installs Chocolatey on the system.
+
+.DESCRIPTION
+This function installs Chocolatey, a package manager for Windows. It does this by setting the execution policy to bypass for the current process, and then invoking the Chocolatey installation script from 'https://chocolatey.org/install.ps1'.
+
+.EXAMPLE
+Install-Chocolatey
+
+This will install Chocolatey on the system.
+
+.NOTES
+The function sets the execution policy to bypass for the current process. This means that the execution policy will be reset to its previous value when the current process exits.
+#>
+function Install-Chocolatey {
+    Set-ExecutionPolicy Bypass -Scope Process -Force
+    Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
+}
+
+<#
+.SYNOPSIS
+Installs a list of packages using Chocolatey.
+
+.DESCRIPTION
+This function takes an array of package names and installs each one using Chocolatey. It forces the installation and automatically confirms all prompts.
+
+.PARAMETER Packages
+An array of package names to install.
+
+.EXAMPLE
+Install-ChocoPackages -Packages @("git", "nodejs")
+
+This will install git and nodejs using Chocolatey.
+
+.NOTES
+Chocolatey must be installed on the system for this function to work.
+#>
+function Install-ChocoPackages {
+    param (
+        [string[]]$Packages
+    )
+
+    foreach ($package in $Packages) {
+        choco install $package -y -Force --ignore-checksums
+    }
+}
+
+<#
+.SYNOPSIS
+Installs Adobe Acrobat.
+
+.DESCRIPTION
+This function downloads Adobe Acrobat from the provided URL, extracts the downloaded file, downloads a transform file, and then installs Adobe Acrobat using the setup file and the transform file.
+
+.PARAMETER AdobeAcrobatWebURL
+The URL from which to download Adobe Acrobat.
+
+.PARAMETER AdobeTransformURL
+The URL from which to download the transform file.
+
+.EXAMPLE
+Install-AdobeAcrobat
+
+This will install Adobe Acrobat.
+
+.NOTES
+The function waits for the installation process to complete before returning.
+#>
+function Install-AdobeAcrobat {
+    param (
+        [string]$AdobeAcrobatWebURL = 'https://trials.adobe.com/AdobeProducts/APRO/Acrobat_HelpX/win32/Acrobat_DC_Web_x64_WWMUI.zip',
+        [string]$AdobeTransformURL = 'https://eusthginfrastructure.blob.core.windows.net/thg-avd-deployment-scripts/AVD_Image_Deployments/AcroPro.mst'
+    )
+    $TempFilePath = Get-TempFilePath -FileName 'AdobeAcrobatWebURL.zip'
+    $TempDirectory = (Split-Path -Path $TempFilePath -Parent)
+    $AcrobatPath = "$TempDirectory\Adobe Acrobat"
+
+    # Download the file
+    Invoke-WebRequest -Uri $AdobeAcrobatWebURL -OutFile $TempFilePath
+
+    # Extract the file
+    Expand-Archive -Path $TempFilePath -DestinationPath $TempDirectory -Force
+
+    # Download transformFile
+    Invoke-WebRequest -Uri $AdobeTransformURL -OutFile "$AcrobatPath\Transforms\AcroPro.mst"
+
+    # Install Adobe Acrobat
+    Start-Process -FilePath "$AcrobatPath\setup.exe" -ArgumentList '/sAll /rs /msi  EULA_ACCEPT=YES LANG_LIST=en_US UPDATE_MODE=0 DISABLE_ARM_SERVICE_INSTALL=1 ADD_THUMBNAILPREVIEW=YES' -Wait
+}
+
+<#
+.SYNOPSIS
+Installs AMS360.
+
+.DESCRIPTION
+This function downloads AMS360 from the provided URL and then installs it.
+
+.PARAMETER AMS360WebURL
+The URL from which to download AMS360.
+
+.EXAMPLE
+Install-AMS360
+
+This will install AMS360.
+
+.NOTES
+The function uses the Invoke-DownloadAndStartProcess function to download and install AMS360.
+#>
+function Install-AMS360 {
+    param (
+        [string]$AMS360WebURL = 'https://eusthginfrastructure.blob.core.windows.net/thg-software-deploy/AMS360ClientInstaller-Rev12.msi'
+    )
+    Invoke-DownloadAndStartProcess -DownloadURL $AMS360WebURL -FileName 'AMS360ClientInstallerRev12.msi' -Arguments '/qn'
+
+    if (Test-Path -Path 'C:\users\Public\Desktop\Install TransactNow.url') {
+        Remove-Item -Path 'C:\users\Public\Desktop\Install TransactNow.url' -Force
+    }
+    if (Test-Path -Path 'C:\users\Public\Desktop\ImageRight Connect 7.0.106.1787.lnk') {
+        Remove-Item -Path 'C:\users\Public\Desktop\ImageRight Connect 7.0.106.1787.lnk' -Force
+    }
 }
 
 <#
@@ -352,6 +305,52 @@ curl -o IRInstallerService.exe.config "https://eusthginfrastructure.blob.core.wi
     Get-Service ImageRight*
 }
 
+function Add-ExtensionPolicy {
+    param (
+        [string]$Browser,
+        [string]$ExtensionID
+    )
+
+    $UpdateURL = "https://clients2.google.com/service/update2/crx"
+
+    # Determine registry path
+    switch ($Browser.ToLower()) {
+        "chrome" { $RegPath = "HKLM:\SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist" }
+        "edge" { $RegPath = "HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist" }
+        default { Write-Warning "Unknown browser: $Browser"; return }
+    }
+
+    # Create registry key if missing
+    if (-not (Test-Path $RegPath)) {
+        New-Item -Path $RegPath -Force | Out-Null
+    }
+
+    # Build value string
+    $Value = "$ExtensionID;$UpdateURL"
+
+    # Read existing entries
+    $ExistingProps = Get-ItemProperty -Path $RegPath -ErrorAction SilentlyContinue | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name
+    $ExistingNumbers = $ExistingProps | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ }
+
+    # Check for duplicates
+    $Duplicate = $false
+    foreach ($Prop in $ExistingProps) {
+        $PropValue = (Get-ItemProperty -Path $RegPath -Name $Prop -ErrorAction SilentlyContinue).$Prop
+        if ($PropValue -eq $Value) {
+            Write-Host "$Browser extension already exists under entry '$Prop': $ExtensionID"
+            $Duplicate = $true
+            break
+        }
+    }
+
+    if (-not $Duplicate) {
+        $NextNumber = if ($ExistingNumbers) { ($ExistingNumbers | Measure-Object -Maximum).Maximum + 1 } else { 1 }
+        New-ItemProperty -Path $RegPath -Name $NextNumber -Value $Value -PropertyType String -Force | Out-Null
+        Write-Host "Added $Browser extension entry #$NextNumber → $ExtensionID"
+    }
+}
+
+
 <#
 .SYNOPSIS
 Installs ImageRight and its dependencies.
@@ -372,23 +371,26 @@ function Install-ImageRight {
     Install-Web2View
     Install-WorkSmart
 
-    $path = 'C:\Program Files (x86)\ImageRight'
-    $acl = Get-Acl -Path $path
-    $user = New-Object -TypeName 'System.Security.Principal.SecurityIdentifier' -ArgumentList @([System.Security.Principal.WellKnownSidType]::AuthenticatedUserSid, $null)
-    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($user, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-    $acl.SetAccessRule($rule)
-    Set-Acl -Path $path -AclObject $acl
+    $PrinterUrl = "https://eusthginfrastructure.blob.core.windows.net/thg-software-deploy/ImageRight/ImageRight.PDFPrinter.64.msi"
+
+    Invoke-DownloadAndStartProcess -DownloadURL $PrinterUrl -FileName "imageRight.PDFPrinter.64.msi" -Arguments '/qn'
+
+    $Extensions = @{
+        "Chrome" = @(
+            "lmjkddpocmpfpfelefmjeikplccmchaj"  # Chrome extension ID
+        )
+        "Edge"   = @(
+            "bbcadncpbhofkhfbpokeflalmknkfjip"  # Edge extension ID
+        )
+    }
+
+    foreach ($Browser in $Extensions.Keys) {
+        foreach ($ExtensionID in $Extensions[$Browser]) {
+            Add-ExtensionPolicy -Browser $Browser -ExtensionID $ExtensionID
+        }
+    }
 }
 
-function Install-MSIXCert {
-    param (
-        [string]$DownloadURL = 'https://eusthginfrastructure.blob.core.windows.net/thg-avd-deployment-scripts/AVD_Image_Deployments/MSIXSigningCert.pfx'
-    )
-    $TempFilePath = Get-TempFilePath -FileName 'MSIXSigningCert.pfx'
-    Invoke-WebRequest -Uri $DownloadURL -OutFile $TempFilePath
-    $password = ConvertTo-SecureString -String 'ZqQEbP7dR6BpDL9oIrZKlqZsAV' -AsPlainText -Force
-    Import-PfxCertificate -Password $password -FilePath $TempFilePath -CertStoreLocation Cert:\LocalMachine\Root
-}
 
 function Remove-QuickAssist {
     $checkQuickAssist = Get-WindowsCapability -Online | Where-Object { $_.name -like '*QuickAssist*' }
@@ -396,52 +398,79 @@ function Remove-QuickAssist {
     if ($checkQuickAssist.state -eq 'Installed') {
         try {
             Remove-WindowsCapability -Online -Name $checkQuickAssist.name -ErrorAction Stop
-        }
-        catch {
+        } catch {
             $error[0].Exception.Message
         }
     }
 }
 
-function Remove-ClassicTeams {
-    Start-Process msiexec.exe -ArgumentList '/x {731F6BAA-A986-45A4-8936-7C3AAAAA760B} /qn' -Wait
+function Disable-OOBESteps {
+    $registryPaths = @{
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE"            = @{
+            "DisablePrivacyExperience" = 1
+            "DisableVoice"             = 1
+            "PrivacyConsentStatus"     = 1
+            "Protectyourpc"            = 3
+            "HideEULAPage"             = 1
+        }
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System" = @{
+            "EnableFirstLogonAnimation" = 1
+        }
+    }
+
+    foreach ($path in $registryPaths.Keys) {
+        foreach ($name in $registryPaths[$path].Keys) {
+            New-ItemProperty -Path $path -Name $name -Value $registryPaths[$path][$name] -PropertyType DWord -Force
+        }
+    }
 }
 
-#Region Main Customization Program
+function Disable-WindowsStoreResults {
+    $SearchPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"
+    if (-not (Test-Path $SearchPath)) {
+        New-Item -Path $SearchPath -Force | Out-Null
+    }
+
+    New-ItemProperty -Path $SearchPath -Name "DisableSearchBoxSuggestions" -Value 1 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path $SearchPath -Name "DisableWebSearch" -Value 1 -PropertyType DWord -Force | Out-Null
+
+    Write-Host "Disabled Windows Store and web results in Start menu search (All Users)."
+
+}
+
+function Install-Office {
+    $ScriptUrl = "https://raw.githubusercontent.com/mwandell-hilbgroup/HilbgroupAutomation/refs/heads/main/AVDImageInstallation/ImageDeployment/InstallOffice32Bit.ps1"
+    Invoke-Expression ((New-Object System.Net.WebClient).DownloadString($ScriptUrl))
+}
 
 Enable-WindowsOptionalFeature -Online -FeatureName 'NetFx3'
 
-Write-Host 'Installing Chocolatey'
+Write-Host "Installing Chocolatey"
 Install-Chocolatey
 
-Write-Host 'Installing Chocolatey Packages'
-Install-ChocoPackages -Packages @('googlechrome', 'notepadplusplus', '7zip', 'vlc', 'roboform', 'trillian')
+Write-Host "Installing Chocolatey Packages"
+Install-ChocoPackages -Packages @('googlechrome', 'notepadplusplus', '7zip', 'vlc')
 
-Write-Host 'Installing Adobe Acrobat'
+Write-Host "Installing Adobe Acrobat"
 Install-AdobeAcrobat
 
-Write-Host 'Installing AMS360'
+Write-Host "Installing AMS360"
 Install-AMS360
 
-Write-Host 'Istalling ImageRight'
+Write-Host "Installing ImageRight"
 Install-ImageRight
 
-Write-Host 'Installing LastPass'
-Install-LastPass
-
-Write-Host 'Installing MSIX Cert'
-Install-MSIXCert
-
-Write-Host 'Removing Classic Teams'
-Remove-ClassicTeams
-
-Write-Host 'Removing Quick Assist'
+Write-Host "Removing Quick Assist"
 Remove-QuickAssist
 
-Write-Host 'Disabling Windows Update Service'
-Set-Service wuauserv -StartupType Disabled
-
-Write-Host 'Setting Time Zone to Eastern Standard Time'
+Write-Host "Setting Time Zone to Eastern Standard Time"
 Set-TimeZone -Name 'Eastern Standard Time'
 
-#EndRegion
+Write-Host "Disabling OOBE"
+Disable-OOBESteps
+
+Write-Host "Disabling Windows Store Results"
+Disable-WindowsStoreResults
+
+Write-Host "Installing Office"
+Install-Office
