@@ -1,3 +1,5 @@
+$ProgressPreference = 'SilentlyContinue'
+
 <#
 .SYNOPSIS
 Generates a temporary file path for a given file name.
