@@ -27,7 +27,7 @@ function Install-ChocoPackages {
 }
 
 function Invoke-AgentInstall {
-    $ScriptUrl = "https://raw.githubusercontent.com/mwandell-hilbgroup/HilbgroupAutomation/refs/heads/main/AVDImageInstallation/Pools/PostBootApplications.ps1"
+    $ScriptUrl = "https://raw.githubusercontent.com/The-Hilb-Group/PublicScripts/refs/heads/main/AVDImageInstallation/Pools/PostBootApplications.ps1"
     Invoke-Expression ((New-Object System.Net.WebClient).DownloadString($ScriptUrl))
 }
 
