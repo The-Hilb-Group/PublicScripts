@@ -52,6 +52,40 @@ function Install-WorkdayOfficeConnect {
     Invoke-DownloadAndStartProcess -DownloadURL $url -FileName "OfficeConnectMachineSetup.exe" -Arguments "/quiet"
 }
 
+function Set-FSLogixBypassGroups {
+    Add-LocalGroupMember -Group "FSLogix ODFC Exclude List" -Member "localadmin" -ErrorAction SilentlyContinue
+    Add-LocalGroupMember -Group "FSLogix Profile Exclude List" -Member "localadmin" -ErrorAction SilentlyContinue
+
+    Add-LocalGroupMember -Group "FSLogix ODFC Exclude List" -Member  "HILBGROUP\AVD_Users_HILB_L2" -ErrorAction SilentlyContinue
+    Add-LocalGroupMember -Group "FSLogix Profile Exclude List" -Member  "HILBGROUP\AVD_Users_HILB_L2" -ErrorAction SilentlyContinue
+
+    Add-LocalGroupMember -Group "FSLogix ODFC Exclude List" -Member  "HILBGROUP\Azure Administrators" -ErrorAction SilentlyContinue
+    Add-LocalGroupMember -Group "FSLogix Profile Exclude List" -Member "HILBGROUP\Azure Administrators" -ErrorAction SilentlyContinue
+}
+
+function Set-TimeZoneToEST {
+    Set-TimeZone -Id "US Eastern Standard Time"
+}
+
+function Set-IRFolderPermissions {
+    $FolderPath = "C:\Program Files (x86)\ImageRight"
+    $Group = "HILBGROUP\AVDUsers"
+
+    $ACL = Get-ACL $FolderPath
+
+    $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $Group,
+        "FullControl",
+        "ContainerInherit,ObjectInherit",
+        "None",
+        "Allow"
+    )
+
+    $acl.AddAccessRule($accessRule)
+
+    Set-Acl -Path $FolderPath -AclObject $acl
+}
+
 
 Install-Qualys
 
@@ -60,3 +94,9 @@ Install-NetSkope
 Install-SentinelOne
 
 Install-WorkdayOfficeConnect
+
+Set-FSLogixBypassGroups
+
+Set-TimeZoneToEST
+
+Set-IRFolderPermissions
