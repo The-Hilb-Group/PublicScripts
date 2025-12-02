@@ -53,8 +53,8 @@ function Install-WorkdayOfficeConnect {
 }
 
 function Set-FSLogixBypassGroups {
-    Add-LocalGroupMember -Group "FSLogix ODFC Exclude List" -Member "localadmin" -ErrorAction SilentlyContinue
-    Add-LocalGroupMember -Group "FSLogix Profile Exclude List" -Member "localadmin" -ErrorAction SilentlyContinue
+    Add-LocalGroupMember -Group "FSLogix ODFC Exclude List" -Member "$ENV:Computername\localadmin" -ErrorAction SilentlyContinue
+    Add-LocalGroupMember -Group "FSLogix Profile Exclude List" -Member "$ENV:Computername\localadmin" -ErrorAction SilentlyContinue
 
     Add-LocalGroupMember -Group "FSLogix ODFC Exclude List" -Member  "HILBGROUP\AVD_Users_HILB_L2" -ErrorAction SilentlyContinue
     Add-LocalGroupMember -Group "FSLogix Profile Exclude List" -Member  "HILBGROUP\AVD_Users_HILB_L2" -ErrorAction SilentlyContinue
