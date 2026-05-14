@@ -13,7 +13,7 @@
         $script:DetectedVersion = $app.Version
         if ($DetectedVersion -eq "25.1.1.206") {
             Write-Host "App is installed with version $DetectedVersion, terminating."
-            ##exit
+            exit
         }
         else {
             Write-Host "App is installed with version $DetectedVersion, which is less than $RequiredVersion, proceeding with install."
