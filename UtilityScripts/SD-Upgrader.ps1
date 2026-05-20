@@ -113,7 +113,7 @@ function Install-SmartDeploy {
     Write-Information "Starting Installation of SmartDeploy Client..."
 
     $startTime = Get-Date
-    $timeout = [TimeSpan]::FromMinutes(5)
+    $timeout = [TimeSpan]::FromMinutes(2)
 
     while (Get-Process -Name msiexec -ErrorAction SilentlyContinue) {
         $elapsedTime = (Get-Date) - $startTime
