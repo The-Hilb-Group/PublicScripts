@@ -88,12 +88,12 @@ function Check-SDVersion {
 
     $detectedApp = "SmartDeploy Client"  
     
-    $RequiredVersion = "3.0.2051.1092"
+    $RequiredVersion = $TargetVersion
 
     $app = Get-WmiObject -Class Win32_Product | Where-Object { $_.Name -eq $DetectedApp }
     if ($app) {
         $script:DetectedVersion = $app.Version
-        if ($DetectedVersion -eq "3.0.2051.1092") {
+        if ($DetectedVersion -eq $TargetVersion) {
             Write-Host "App is installed with version $DetectedVersion, terminating."
             #exit
         } else {
