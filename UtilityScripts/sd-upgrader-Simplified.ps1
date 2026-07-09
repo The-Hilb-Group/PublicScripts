@@ -3,7 +3,7 @@ $DownloadUrl = "https://eusthginfrastructure.blob.core.windows.net/thg-software-
 $AppPath = "C:\HILB\SDClientSetup-cloudonly.msi"
 $Path = "c:\hilb"
 $ServiceName = "SDClientService"
-$TargetVersion = "3.0.2051.1092"
+$TargetVersion = "3.0.2060.1239"
 $InformationPreference = 'Continue'
 
 function Remove-FailedInstallation {
