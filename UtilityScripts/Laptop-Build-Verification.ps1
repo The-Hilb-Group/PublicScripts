@@ -38,7 +38,10 @@
     Part 8: Checks whether Snipping Tool is present (modern package or the
     legacy System32 executable).
 
-    Part 9: Exports all results (apps + all extra checks) to a PDF report at
+    Part 9: Checks whether a .NET 10 runtime is installed, via
+    "dotnet --list-runtimes". Check only - no remediation is attempted.
+
+    Part 10: Exports all results (apps + all extra checks) to a PDF report at
     C:\hilb\HOSTNAME_build_report.pdf (HOSTNAME replaced with the device's
     actual hostname), rendered via Microsoft Edge's built-in headless
     print-to-PDF feature - no extra modules or Office required.
@@ -65,7 +68,7 @@
     - Enabling .NET Framework 3.5 (if it's not already enabled) DOES require
       an elevated/Administrator PowerShell session. If not elevated, the
       script will report the current state but skip the enable attempt.
-    - Part 9 writes a PDF report to C:\hilb\HOSTNAME_build_report.pdf on
+    - Part 10 writes a PDF report to C:\hilb\HOSTNAME_build_report.pdf on
       every run (HOSTNAME is the device's actual computer name), rendered
       via headless Microsoft Edge (--headless --print-to-pdf). Requires
       Edge to be present at its default install path or on PATH - it ships
@@ -245,7 +248,7 @@ try {
 catch {
     $netFxQueryFailed = $true
     $netFxState = "Unknown"
-    $netFxAction = "Unable to query feature state: $($_.Exception.Message)"
+    $netFxAction = "Unable to query feature state - this usually requires an elevated session: $($_.Exception.Message)"
 }
 
 # Capture the state as first observed, before any remediation attempt below,
@@ -500,10 +503,50 @@ $snipResult = [PSCustomObject]@{
 }
 
 # ===========================================================================
+# PART 9 - .NET 10 runtime presence (check only, no remediation)
+# ===========================================================================
+$dotnet10Found   = $false
+$dotnet10Version = $null
+$dotnet10Detail  = $null
+
+$dotnetCmd = Get-Command -Name "dotnet.exe" -ErrorAction SilentlyContinue
+if (-not $dotnetCmd) {
+    $dotnet10Detail = "dotnet.exe not found on PATH"
+}
+else {
+    try {
+        $runtimesRaw = & dotnet.exe --list-runtimes 2>$null
+        $matchingRuntimes = $runtimesRaw | Where-Object { $_ -match '^\S+\s+10\.' }
+        if ($matchingRuntimes) {
+            $dotnet10Found = $true
+            $firstMatchParts = ($matchingRuntimes | Select-Object -First 1) -split '\s+'
+            $dotnet10Version = $firstMatchParts[1]
+            $dotnet10Detail  = ($matchingRuntimes -join '; ')
+        }
+        else {
+            $dotnet10Detail = "No .NET 10 runtime found via 'dotnet --list-runtimes'"
+        }
+    }
+    catch {
+        $dotnet10Detail = "Unable to query installed .NET runtimes: $($_.Exception.Message)"
+    }
+}
+
+$dotnet10Result = [PSCustomObject]@{
+    CheckType    = '.NET 10'
+    RequestedApp = '.NET 10 Runtime'
+    Installed    = $dotnet10Found
+    DisplayName  = $null
+    Version      = $dotnet10Version
+    Detail       = $dotnet10Detail
+}
+
+# ===========================================================================
 # Combine all results
 # ===========================================================================
 $results = @($appResults) + @($chocoResult) + @($netFxResult) + @($regResult) + `
-           @($hostnameResult) + @($wifiResult) + @($msStoreResult) + @($snipResult)
+           @($hostnameResult) + @($wifiResult) + @($msStoreResult) + @($snipResult) + `
+           @($dotnet10Result)
 
 # ===========================================================================
 # Output - color-coded per-item console report
@@ -693,6 +736,16 @@ else {
     Write-Host "$($snipResult.RequestedApp)  |  $($snipResult.Detail)" -ForegroundColor White -BackgroundColor Black
 }
 
+# .NET 10
+if ($dotnet10Result.Installed) {
+    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
+    Write-Host "$($dotnet10Result.RequestedApp)  |  Version: $($dotnet10Result.Version)" -ForegroundColor White -BackgroundColor Black
+}
+else {
+    Write-Host "[MISSING]   " -ForegroundColor Red -NoNewline
+    Write-Host "$($dotnet10Result.RequestedApp)  |  $($dotnet10Result.Detail)" -ForegroundColor White -BackgroundColor Black
+}
+
 Write-Host ""
 
 # ===========================================================================
@@ -700,7 +753,7 @@ Write-Host ""
 # ===========================================================================
 $installedCount = ($appLines | Where-Object { $_.Installed }).Count
 $missingCount    = ($appLines | Where-Object { -not $_.Installed }).Count
-$extraChecks     = @($netFxResult, $regResult, $hostnameResult, $wifiResult, $msStoreResult, $snipResult)
+$extraChecks     = @($netFxResult, $regResult, $hostnameResult, $wifiResult, $msStoreResult, $snipResult, $dotnet10Result)
 $extraSkipped    = $extraChecks | Where-Object { $_.Skipped -eq $true }
 $extraOk         = $extraChecks | Where-Object { -not $_.Skipped -and $_.Installed }
 $extraIssues     = $extraChecks | Where-Object { -not $_.Skipped -and -not $_.Installed }
@@ -726,7 +779,7 @@ if (-not $isAdmin) {
 }
 
 # ===========================================================================
-# PART 9 - Export all results to a PDF report (via headless Microsoft Edge)
+# PART 10 - Export all results to a PDF report (via headless Microsoft Edge)
 # ===========================================================================
 # Builds an HTML version of everything shown in the console above, then
 # renders it to PDF using Microsoft Edge's built-in headless "print to PDF"
@@ -881,6 +934,14 @@ function Export-BuildReportPdf {
     }
     else {
         [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $snipResult.RequestedApp)  |  $(ConvertTo-SafeHtml $snipResult.Detail)</span></div>")
+    }
+
+    # .NET 10
+    if ($dotnet10Result.Installed) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $dotnet10Result.RequestedApp)  |  Version: $(ConvertTo-SafeHtml $dotnet10Result.Version)</span></div>")
+    }
+    else {
+        [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $dotnet10Result.RequestedApp)  |  $(ConvertTo-SafeHtml $dotnet10Result.Detail)</span></div>")
     }
 
     # Summary
