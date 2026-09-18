@@ -487,6 +487,16 @@ $appLines = foreach ($group in $grouped) {
     }
 }
 
+# Chocolatey is a genuine installed application, but it doesn't register an
+# uninstall entry in the registry/Control Panel like the apps above, so it's
+# checked separately (Part 2) - fold its result into the same app list here
+# so it reports and aligns alongside everything else.
+$appLines += [PSCustomObject]@{
+    Installed   = $chocoResult.Installed
+    NameText    = $chocoResult.RequestedApp
+    VersionText = $chocoResult.Version
+}
+
 $maxAppNameLength = ($appLines | ForEach-Object { $_.NameText.Length } | Measure-Object -Maximum).Maximum
 
 # Second pass: print, padding every name to the same width so the
@@ -508,16 +518,6 @@ Write-Host ""
 Write-Host "Additional System Checks" -ForegroundColor Cyan
 Write-Host "=========================" -ForegroundColor Cyan
 Write-Host ""
-
-# Chocolatey
-if ($chocoResult.Installed) {
-    Write-Host "[INSTALLED] " -ForegroundColor Green -NoNewline
-    Write-Host "$($chocoResult.RequestedApp) -> $($chocoResult.DisplayName)  |  Version: $($chocoResult.Version)" -ForegroundColor White -BackgroundColor Black
-}
-else {
-    Write-Host "[MISSING]   " -ForegroundColor Red -NoNewline
-    Write-Host "$($chocoResult.RequestedApp)  |  $($chocoResult.Detail)" -ForegroundColor White -BackgroundColor Black
-}
 
 # .NET 3.5
 if ($netFxResult.Skipped) {
@@ -605,9 +605,9 @@ Write-Host ""
 # ===========================================================================
 # Summary
 # ===========================================================================
-$installedCount = ($grouped | Where-Object { $_.Group[0].Installed }).Count
-$missingCount    = ($grouped | Where-Object { -not $_.Group[0].Installed }).Count
-$extraChecks     = @($chocoResult, $netFxResult, $regResult, $hostnameResult, $wifiResult, $msStoreResult, $snipResult)
+$installedCount = ($appLines | Where-Object { $_.Installed }).Count
+$missingCount    = ($appLines | Where-Object { -not $_.Installed }).Count
+$extraChecks     = @($netFxResult, $regResult, $hostnameResult, $wifiResult, $msStoreResult, $snipResult)
 $extraSkipped    = $extraChecks | Where-Object { $_.Skipped -eq $true }
 $extraOk         = $extraChecks | Where-Object { -not $_.Skipped -and $_.Installed }
 $extraIssues     = $extraChecks | Where-Object { -not $_.Skipped -and -not $_.Installed }
@@ -719,15 +719,16 @@ function Export-BuildReportPdf {
         }
     }
 
-    [void]$sb.AppendLine("<h2>Additional System Checks</h2>")
-
-    # Chocolatey
+    # Chocolatey doesn't register an uninstall entry like the apps above, but
+    # it's a genuine installed application - report it alongside them here.
     if ($chocoResult.Installed) {
-        [void]$sb.AppendLine("<div class='line'><span class='ok'>[INSTALLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $chocoResult.RequestedApp) -> $(ConvertTo-SafeHtml $chocoResult.DisplayName)  |  Version: $(ConvertTo-SafeHtml $chocoResult.Version)</span></div>")
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[INSTALLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $chocoResult.RequestedApp)  |  Version: $(ConvertTo-SafeHtml $chocoResult.Version)</span></div>")
     }
     else {
-        [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $chocoResult.RequestedApp)  |  $(ConvertTo-SafeHtml $chocoResult.Detail)</span></div>")
+        [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $chocoResult.RequestedApp)  |  Not found on this system</span></div>")
     }
+
+    [void]$sb.AppendLine("<h2>Additional System Checks</h2>")
 
     # .NET 3.5
     if ($netFxResult.Skipped) {
