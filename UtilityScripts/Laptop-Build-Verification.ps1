@@ -31,7 +31,9 @@
     machine (via netsh wlan show profiles). Reports green if found, red if
     not.
 
-    Part 7: Checks whether the Microsoft Store app package is present.
+    Part 7: Checks whether the Microsoft Store app package is present. If
+    missing, attempts to restore it by running "wsreset -i", waits 2
+    minutes, then rechecks.
 
     Part 8: Checks whether Snipping Tool is present (modern package or the
     legacy System32 executable).
@@ -243,7 +245,7 @@ try {
 catch {
     $netFxQueryFailed = $true
     $netFxState = "Unknown"
-    $netFxAction = "Unable to query feature state - this usually requires an elevated session: $($_.Exception.Message)"
+    $netFxAction = "Unable to query feature state: $($_.Exception.Message)"
 }
 
 # Capture the state as first observed, before any remediation attempt below,
@@ -354,11 +356,12 @@ $wifiResult = [PSCustomObject]@{
 }
 
 # ===========================================================================
-# PART 7 - Microsoft Store presence
+# PART 7 - Microsoft Store presence (re-register and recheck if missing)
 # ===========================================================================
 $msStorePkg       = $null
 $msStoreInstalled = $false
 $msStoreVersion   = $null
+$msStoreAction    = $null
 
 try {
     $msStorePkg = Get-AppxPackage -Name "Microsoft.WindowsStore" -ErrorAction SilentlyContinue
@@ -371,23 +374,52 @@ catch {
     # Get-AppxPackage can throw on some locked-down/Server builds - treat as not found
 }
 
+# Capture the state as first observed, before any remediation attempt below,
+# so we can distinguish "already present" from "restored during this run".
+$msStoreWasAlreadyEnabled = $msStoreInstalled
+
+if (-not $msStoreInstalled) {
+    try {
+        Write-Verbose "Attempting to reinstall the Microsoft Store via wsreset -i..."
+        Start-Process -FilePath "wsreset.exe" -ArgumentList "-i" -WindowStyle Hidden -ErrorAction Stop
+
+        Write-Verbose "Waiting 2 minutes before rechecking Microsoft Store..."
+        Start-Sleep -Seconds 120
+
+        $msStorePkg = Get-AppxPackage -Name "Microsoft.WindowsStore" -ErrorAction SilentlyContinue
+        if ($msStorePkg) {
+            $msStoreInstalled = $true
+            $msStoreVersion   = $msStorePkg.Version
+            $msStoreAction    = "Was missing - 'wsreset -i' attempted during this run."
+        }
+        else {
+            $msStoreAction = "'wsreset -i' attempted, but Microsoft Store is still missing after rechecking."
+        }
+    }
+    catch {
+        $msStoreAction = "'wsreset -i' attempt FAILED: $($_.Exception.Message)"
+    }
+}
+
 $msStoreResult = [PSCustomObject]@{
-    CheckType    = 'MS Store'
-    RequestedApp = 'Microsoft Store'
-    Installed    = $msStoreInstalled
-    DisplayName  = $null
-    Version      = $msStoreVersion
-    Detail       = if (-not $msStoreInstalled) { "Microsoft.WindowsStore package not found for current user" } else { $null }
+    CheckType           = 'MS Store'
+    RequestedApp        = 'Microsoft Store'
+    Installed           = $msStoreInstalled
+    WasAlreadyEnabled    = $msStoreWasAlreadyEnabled
+    DisplayName         = $null
+    Version             = $msStoreVersion
+    Detail              = $msStoreAction
 }
 
 # ===========================================================================
-# PART 8 - Snipping Tool presence (modern package or legacy exe)
+# PART 8 - Snipping Tool presence (reinstall and recheck if missing)
 # ===========================================================================
 $snipPkg         = $null
 $snipExePath     = Join-Path -Path $env:WINDIR -ChildPath "System32\SnippingTool.exe"
 $snipInstalled   = $false
 $snipVersion     = $null
 $snipSource      = $null
+$snipAction      = $null
 
 try {
     $snipPkg = Get-AppxPackage -Name "Microsoft.ScreenSketch" -ErrorAction SilentlyContinue
@@ -412,13 +444,59 @@ elseif (Test-Path -Path $snipExePath) {
     $snipSource = "Legacy executable ($snipExePath)"
 }
 
+# Capture the state as first observed, before any remediation attempt below,
+# so we can distinguish "already present" from "restored during this run".
+$snipWasAlreadyEnabled = $snipInstalled
+
+if (-not $snipInstalled) {
+    if (-not $isAdmin) {
+        $snipAction = "Missing, and this session is not elevated - skipped reinstall attempt. Re-run as Administrator to restore."
+    }
+    else {
+        try {
+            Write-Verbose "Attempting to reinstall Snipping Tool (Microsoft.ScreenSketch)..."
+            Get-AppxPackage -AllUsers *Microsoft.ScreenSketch* | ForEach-Object {
+                Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" -ErrorAction Stop
+            }
+            Write-Verbose "Waiting 2 minutes before rechecking Snipping Tool..."
+            Start-Sleep -Seconds 120
+
+            $snipPkg = Get-AppxPackage -Name "Microsoft.ScreenSketch" -ErrorAction SilentlyContinue
+            if ($snipPkg) {
+                $snipInstalled = $true
+                $snipVersion   = $snipPkg.Version
+                $snipSource    = "Modern package (Microsoft.ScreenSketch)"
+                $snipAction    = "Was missing - reinstall attempted during this run."
+            }
+            elseif (Test-Path -Path $snipExePath) {
+                $snipInstalled = $true
+                try {
+                    $snipVersion = (Get-Item -Path $snipExePath).VersionInfo.ProductVersion
+                }
+                catch {
+                    $snipVersion = "(version unknown)"
+                }
+                $snipSource = "Legacy executable ($snipExePath)"
+                $snipAction = "Was missing - reinstall attempted during this run (found via legacy exe on recheck)."
+            }
+            else {
+                $snipAction = "Reinstall attempted, but Snipping Tool is still missing after rechecking."
+            }
+        }
+        catch {
+            $snipAction = "Reinstall attempt FAILED: $($_.Exception.Message)"
+        }
+    }
+}
+
 $snipResult = [PSCustomObject]@{
-    CheckType    = 'Snipping Tool'
-    RequestedApp = 'Snipping Tool'
-    Installed    = $snipInstalled
-    DisplayName  = $snipSource
-    Version      = $snipVersion
-    Detail       = if (-not $snipInstalled) { "Not found (checked modern package and legacy System32 exe)" } else { $null }
+    CheckType           = 'Snipping Tool'
+    RequestedApp        = 'Snipping Tool'
+    Installed           = $snipInstalled
+    WasAlreadyEnabled    = $snipWasAlreadyEnabled
+    DisplayName         = $snipSource
+    Version             = $snipVersion
+    Detail              = $snipAction
 }
 
 # ===========================================================================
@@ -576,10 +654,17 @@ else {
 }
 
 # Microsoft Store
-if ($msStoreResult.Installed) {
-    Write-Host "[INSTALLED] " -ForegroundColor Green -NoNewline
+if ($msStoreResult.Installed -and $msStoreResult.WasAlreadyEnabled) {
+    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
     $line = "$($msStoreResult.RequestedApp)"
     if ($msStoreResult.Version) { $line += "  |  Version: $($msStoreResult.Version)" }
+    Write-Host $line -ForegroundColor White -BackgroundColor Black
+}
+elseif ($msStoreResult.Installed) {
+    Write-Host "[ENABLED]   " -ForegroundColor Green -NoNewline
+    $line = "$($msStoreResult.RequestedApp)"
+    if ($msStoreResult.Version) { $line += "  |  Version: $($msStoreResult.Version)" }
+    if ($msStoreResult.Detail)  { $line += "  |  $($msStoreResult.Detail)" }
     Write-Host $line -ForegroundColor White -BackgroundColor Black
 }
 else {
@@ -588,11 +673,19 @@ else {
 }
 
 # Snipping Tool
-if ($snipResult.Installed) {
-    Write-Host "[INSTALLED] " -ForegroundColor Green -NoNewline
+if ($snipResult.Installed -and $snipResult.WasAlreadyEnabled) {
+    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
     $line = "$($snipResult.RequestedApp)"
     if ($snipResult.DisplayName) { $line += "  |  $($snipResult.DisplayName)" }
     if ($snipResult.Version)     { $line += "  |  Version: $($snipResult.Version)" }
+    Write-Host $line -ForegroundColor White -BackgroundColor Black
+}
+elseif ($snipResult.Installed) {
+    Write-Host "[ENABLED]   " -ForegroundColor Green -NoNewline
+    $line = "$($snipResult.RequestedApp)"
+    if ($snipResult.DisplayName) { $line += "  |  $($snipResult.DisplayName)" }
+    if ($snipResult.Version)     { $line += "  |  Version: $($snipResult.Version)" }
+    if ($snipResult.Detail)      { $line += "  |  $($snipResult.Detail)" }
     Write-Host $line -ForegroundColor White -BackgroundColor Black
 }
 else {
@@ -769,16 +862,22 @@ function Export-BuildReportPdf {
     }
 
     # Microsoft Store
-    if ($msStoreResult.Installed) {
-        [void]$sb.AppendLine("<div class='line'><span class='ok'>[INSTALLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $msStoreResult.RequestedApp)  |  Version: $(ConvertTo-SafeHtml $msStoreResult.Version)</span></div>")
+    if ($msStoreResult.Installed -and $msStoreResult.WasAlreadyEnabled) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $msStoreResult.RequestedApp)  |  Version: $(ConvertTo-SafeHtml $msStoreResult.Version)</span></div>")
+    }
+    elseif ($msStoreResult.Installed) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[ENABLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $msStoreResult.RequestedApp)  |  Version: $(ConvertTo-SafeHtml $msStoreResult.Version)  |  $(ConvertTo-SafeHtml $msStoreResult.Detail)</span></div>")
     }
     else {
         [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $msStoreResult.RequestedApp)  |  $(ConvertTo-SafeHtml $msStoreResult.Detail)</span></div>")
     }
 
     # Snipping Tool
-    if ($snipResult.Installed) {
-        [void]$sb.AppendLine("<div class='line'><span class='ok'>[INSTALLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $snipResult.RequestedApp)  |  $(ConvertTo-SafeHtml $snipResult.DisplayName)  |  Version: $(ConvertTo-SafeHtml $snipResult.Version)</span></div>")
+    if ($snipResult.Installed -and $snipResult.WasAlreadyEnabled) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $snipResult.RequestedApp)  |  $(ConvertTo-SafeHtml $snipResult.DisplayName)  |  Version: $(ConvertTo-SafeHtml $snipResult.Version)</span></div>")
+    }
+    elseif ($snipResult.Installed) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[ENABLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $snipResult.RequestedApp)  |  $(ConvertTo-SafeHtml $snipResult.DisplayName)  |  Version: $(ConvertTo-SafeHtml $snipResult.Version)  |  $(ConvertTo-SafeHtml $snipResult.Detail)</span></div>")
     }
     else {
         [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $snipResult.RequestedApp)  |  $(ConvertTo-SafeHtml $snipResult.Detail)</span></div>")
