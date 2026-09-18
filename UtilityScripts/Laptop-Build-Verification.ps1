@@ -99,6 +99,7 @@ $AppList = @(
     "Zoom Workplace (64-bit)"
     "ITSPlatform"
     "Sentinel Agent"
+    "Dell Command | Update for Windows Universal"
 )
 
 # ===========================================================================
