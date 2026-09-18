@@ -27,7 +27,7 @@
     Part 5: Checks that the computer's hostname does NOT contain "SD-".
     Reports green if it does not, red if it does.
 
-    Part 6: Checks whether the WiFi profile "HILB-WiFI" is present on the
+    Part 6: Checks whether the WiFi profile "HILB-WiFi" is present on the
     machine (via netsh wlan show profiles). Reports green if found, red if
     not.
 
@@ -36,9 +36,10 @@
     Part 8: Checks whether Snipping Tool is present (modern package or the
     legacy System32 executable).
 
-    Part 9: Exports all results (apps + all extra checks) to a fixed CSV
-    path, C:\hilb\HOSTNAME_build_report.csv (HOSTNAME replaced with the
-    device's actual hostname), in addition to the console output.
+    Part 9: Exports all results (apps + all extra checks) to a PDF report at
+    C:\hilb\HOSTNAME_build_report.pdf (HOSTNAME replaced with the device's
+    actual hostname), rendered via Microsoft Edge's built-in headless
+    print-to-PDF feature - no extra modules or Office required.
 
     All results are printed to the console, color-coded green (good/present)
     or red (missing/misconfigured).
@@ -62,9 +63,14 @@
     - Enabling .NET Framework 3.5 (if it's not already enabled) DOES require
       an elevated/Administrator PowerShell session. If not elevated, the
       script will report the current state but skip the enable attempt.
-    - Part 9 writes a CSV report to C:\hilb\HOSTNAME_build_report.csv on
-      every run (HOSTNAME is the device's actual computer name); the
-      destination folder is created automatically if it doesn't exist.
+    - Part 9 writes a PDF report to C:\hilb\HOSTNAME_build_report.pdf on
+      every run (HOSTNAME is the device's actual computer name), rendered
+      via headless Microsoft Edge (--headless --print-to-pdf). Requires
+      Edge to be present at its default install path or on PATH - it ships
+      by default on Windows 10 1809+ and all Windows 11 builds. If Edge
+      isn't found, the script logs a warning and skips the PDF export
+      rather than failing the run. The destination folder is created
+      automatically if it doesn't exist.
 #>
 
 [CmdletBinding()]
@@ -111,6 +117,9 @@ $FriendlyNames = @{
     "ITSPlatform" = "Connectwise RMM"
     "ScreenConnect Client (aeeac260f410d99c)" = "ScreenConnect - HILB"
     "ScreenConnect Client (3d8353d2b9161111)" = "ScreenConnect - RMM"
+    "Microsoft 365 Apps for enterprise - en-us" = "Microsoft 365 Apps"
+    "Dialpad Machine-Wide Installer" = "Dialpad"
+    "Dell Command | Update for Windows Universal" = "Dell Command | Update"
 }
 
 # ---------------------------------------------------------------------------
@@ -237,6 +246,10 @@ catch {
     $netFxAction = "Unable to query feature state - this usually requires an elevated session: $($_.Exception.Message)"
 }
 
+# Capture the state as first observed, before any remediation attempt below,
+# so we can distinguish "already enabled" from "enabled during this run".
+$netFxWasAlreadyEnabled = ($netFxState -eq 'Enabled')
+
 if (-not $netFxQueryFailed -and $netFxState -ne 'Enabled') {
     if (-not $isAdmin) {
         $netFxAction = "Disabled - session is not elevated, so the enable attempt was skipped. Re-run as Administrator to enable."
@@ -257,13 +270,14 @@ if (-not $netFxQueryFailed -and $netFxState -ne 'Enabled') {
 $netFxOk = ($netFxState -eq 'Enabled')
 
 $netFxResult = [PSCustomObject]@{
-    CheckType    = '.NET 3.5'
-    RequestedApp = '.NET Framework 3.5 (NetFx3)'
-    Installed    = $netFxOk
-    Skipped      = $netFxQueryFailed
-    DisplayName  = "State: $netFxState"
-    Version      = $null
-    Detail       = $netFxAction
+    CheckType           = '.NET 3.5'
+    RequestedApp        = '.NET Framework 3.5 (NetFx3)'
+    Installed           = $netFxOk
+    Skipped             = $netFxQueryFailed
+    WasAlreadyEnabled    = $netFxWasAlreadyEnabled
+    DisplayName         = "State: $netFxState"
+    Version             = $null
+    Detail              = $netFxAction
 }
 
 # ===========================================================================
@@ -313,9 +327,9 @@ $hostnameResult = [PSCustomObject]@{
 }
 
 # ===========================================================================
-# PART 6 - Required WiFi profile "HILB-WiFI"
+# PART 6 - Required WiFi profile "HILB-WiFi"
 # ===========================================================================
-$wifiProfileName = "HILB-WiFI"
+$wifiProfileName = "HILB-WiFi"
 $wifiFound       = $false
 $wifiDetail      = $null
 
@@ -423,7 +437,10 @@ Write-Host ""
 
 $grouped = $appResults | Group-Object RequestedApp
 
-foreach ($group in $grouped) {
+# First pass: resolve the display name/version text for each app without
+# printing yet, so we can measure the longest name and align every
+# "| Version:" column underneath it.
+$appLines = foreach ($group in $grouped) {
     $entries = $group.Group
 
     if ($entries[0].Installed) {
@@ -441,14 +458,18 @@ foreach ($group in $grouped) {
         }
 
         $versionText = if ($entry.Version) { $entry.Version } else { "(version unknown)" }
-        $nameText = if ($entry.DisplayName -eq $entry.RequestedApp) {
+        $nameText = if ($entry.DisplayName -eq $entry.RequestedApp -or $entry.DisplayName.StartsWith($entry.RequestedApp, [System.StringComparison]::OrdinalIgnoreCase)) {
             $displayRequestedName
         }
         else {
             "$displayRequestedName -> $($entry.DisplayName)"
         }
-        Write-Host "[INSTALLED] " -ForegroundColor Green -NoNewline
-        Write-Host "$nameText  |  Version: $versionText" -ForegroundColor Green
+
+        [PSCustomObject]@{
+            Installed   = $true
+            NameText    = $nameText
+            VersionText = $versionText
+        }
     }
     else {
         $displayMissingName = if ($FriendlyNames.ContainsKey($group.Name)) {
@@ -457,8 +478,29 @@ foreach ($group in $grouped) {
         else {
             $group.Name
         }
+
+        [PSCustomObject]@{
+            Installed   = $false
+            NameText    = $displayMissingName
+            VersionText = $null
+        }
+    }
+}
+
+$maxAppNameLength = ($appLines | ForEach-Object { $_.NameText.Length } | Measure-Object -Maximum).Maximum
+
+# Second pass: print, padding every name to the same width so the
+# "| Version:" (and "| Not found...") columns line up.
+foreach ($line in $appLines) {
+    $paddedName = $line.NameText.PadRight($maxAppNameLength)
+
+    if ($line.Installed) {
+        Write-Host "[INSTALLED] " -ForegroundColor Green -NoNewline
+        Write-Host "$paddedName  |  Version: $($line.VersionText)" -ForegroundColor White -BackgroundColor Black
+    }
+    else {
         Write-Host "[MISSING]   " -ForegroundColor Red -NoNewline
-        Write-Host "$displayMissingName  |  Not found on this system" -ForegroundColor Red
+        Write-Host "$paddedName  |  Not found on this system" -ForegroundColor White -BackgroundColor Black
     }
 }
 
@@ -470,11 +512,11 @@ Write-Host ""
 # Chocolatey
 if ($chocoResult.Installed) {
     Write-Host "[INSTALLED] " -ForegroundColor Green -NoNewline
-    Write-Host "$($chocoResult.RequestedApp) -> $($chocoResult.DisplayName)  |  Version: $($chocoResult.Version)" -ForegroundColor Green
+    Write-Host "$($chocoResult.RequestedApp) -> $($chocoResult.DisplayName)  |  Version: $($chocoResult.Version)" -ForegroundColor White -BackgroundColor Black
 }
 else {
     Write-Host "[MISSING]   " -ForegroundColor Red -NoNewline
-    Write-Host "$($chocoResult.RequestedApp)  |  $($chocoResult.Detail)" -ForegroundColor Red
+    Write-Host "$($chocoResult.RequestedApp)  |  $($chocoResult.Detail)" -ForegroundColor White -BackgroundColor Black
 }
 
 # .NET 3.5
@@ -482,49 +524,55 @@ if ($netFxResult.Skipped) {
     Write-Host "[SKIPPED]   " -ForegroundColor Yellow -NoNewline
     $line = "$($netFxResult.RequestedApp)  |  $($netFxResult.DisplayName)"
     if ($netFxResult.Detail) { $line += "  |  $($netFxResult.Detail)" }
-    Write-Host $line -ForegroundColor Yellow
+    Write-Host $line -ForegroundColor White -BackgroundColor Black
+}
+elseif ($netFxResult.Installed -and $netFxResult.WasAlreadyEnabled) {
+    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
+    $line = "$($netFxResult.RequestedApp)  |  $($netFxResult.DisplayName)"
+    if ($netFxResult.Detail) { $line += "  |  $($netFxResult.Detail)" }
+    Write-Host $line -ForegroundColor White -BackgroundColor Black
 }
 elseif ($netFxResult.Installed) {
     Write-Host "[ENABLED]   " -ForegroundColor Green -NoNewline
     $line = "$($netFxResult.RequestedApp)  |  $($netFxResult.DisplayName)"
     if ($netFxResult.Detail) { $line += "  |  $($netFxResult.Detail)" }
-    Write-Host $line -ForegroundColor Green
+    Write-Host $line -ForegroundColor White -BackgroundColor Black
 }
 else {
     Write-Host "[DISABLED]  " -ForegroundColor Red -NoNewline
     $line = "$($netFxResult.RequestedApp)  |  $($netFxResult.DisplayName)"
     if ($netFxResult.Detail) { $line += "  |  $($netFxResult.Detail)" }
-    Write-Host $line -ForegroundColor Red
+    Write-Host $line -ForegroundColor White -BackgroundColor Black
 }
 
 # Registry key
 if ($regResult.Installed) {
     Write-Host "[OK]        " -ForegroundColor Green -NoNewline
-    Write-Host "$($regResult.RequestedApp)  |  $($regResult.Detail)" -ForegroundColor Green
+    Write-Host "$($regResult.RequestedApp)  |  $($regResult.Detail)" -ForegroundColor White -BackgroundColor Black
 }
 else {
     Write-Host "[ISSUE]     " -ForegroundColor Red -NoNewline
-    Write-Host "$($regResult.RequestedApp)  |  $($regResult.Detail)" -ForegroundColor Red
+    Write-Host "$($regResult.RequestedApp)  |  $($regResult.Detail)" -ForegroundColor White -BackgroundColor Black
 }
 
 # Hostname naming convention
 if ($hostnameResult.Installed) {
     Write-Host "[OK]        " -ForegroundColor Green -NoNewline
-    Write-Host "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" -ForegroundColor Green
+    Write-Host "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" -ForegroundColor White -BackgroundColor Black
 }
 else {
     Write-Host "[ISSUE]     " -ForegroundColor Red -NoNewline
-    Write-Host "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" -ForegroundColor Red
+    Write-Host "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" -ForegroundColor White -BackgroundColor Black
 }
 
 # WiFi profile
 if ($wifiResult.Installed) {
     Write-Host "[FOUND]     " -ForegroundColor Green -NoNewline
-    Write-Host "$($wifiResult.RequestedApp)  |  $($wifiResult.Detail)" -ForegroundColor Green
+    Write-Host "$($wifiResult.RequestedApp)  |  $($wifiResult.Detail)" -ForegroundColor White -BackgroundColor Black
 }
 else {
     Write-Host "[MISSING]   " -ForegroundColor Red -NoNewline
-    Write-Host "$($wifiResult.RequestedApp)  |  $($wifiResult.Detail)" -ForegroundColor Red
+    Write-Host "$($wifiResult.RequestedApp)  |  $($wifiResult.Detail)" -ForegroundColor White -BackgroundColor Black
 }
 
 # Microsoft Store
@@ -532,11 +580,11 @@ if ($msStoreResult.Installed) {
     Write-Host "[INSTALLED] " -ForegroundColor Green -NoNewline
     $line = "$($msStoreResult.RequestedApp)"
     if ($msStoreResult.Version) { $line += "  |  Version: $($msStoreResult.Version)" }
-    Write-Host $line -ForegroundColor Green
+    Write-Host $line -ForegroundColor White -BackgroundColor Black
 }
 else {
     Write-Host "[MISSING]   " -ForegroundColor Red -NoNewline
-    Write-Host "$($msStoreResult.RequestedApp)  |  $($msStoreResult.Detail)" -ForegroundColor Red
+    Write-Host "$($msStoreResult.RequestedApp)  |  $($msStoreResult.Detail)" -ForegroundColor White -BackgroundColor Black
 }
 
 # Snipping Tool
@@ -545,11 +593,11 @@ if ($snipResult.Installed) {
     $line = "$($snipResult.RequestedApp)"
     if ($snipResult.DisplayName) { $line += "  |  $($snipResult.DisplayName)" }
     if ($snipResult.Version)     { $line += "  |  Version: $($snipResult.Version)" }
-    Write-Host $line -ForegroundColor Green
+    Write-Host $line -ForegroundColor White -BackgroundColor Black
 }
 else {
     Write-Host "[MISSING]   " -ForegroundColor Red -NoNewline
-    Write-Host "$($snipResult.RequestedApp)  |  $($snipResult.Detail)" -ForegroundColor Red
+    Write-Host "$($snipResult.RequestedApp)  |  $($snipResult.Detail)" -ForegroundColor White -BackgroundColor Black
 }
 
 Write-Host ""
@@ -585,26 +633,214 @@ if (-not $isAdmin) {
 }
 
 # ===========================================================================
-# PART 9 - Export all results to a fixed CSV path
+# PART 9 - Export all results to a PDF report (via headless Microsoft Edge)
 # ===========================================================================
-# Exports the full $results set (apps + all extra checks) to
-# C:\hilb\HOSTNAME_build_report.csv (HOSTNAME is the device's actual
-# computer name), in addition to the console output above.
-function Export-BuildReport {
+# Builds an HTML version of everything shown in the console above, then
+# renders it to PDF using Microsoft Edge's built-in headless "print to PDF"
+# feature. No extra PowerShell modules, no Office/Word, no third-party PDF
+# libraries required - just Edge, which ships by default on Windows 10
+# 1809+ and all Windows 11 builds.
+#
+# Output: C:\hilb\HOSTNAME_build_report.pdf (HOSTNAME is the device's
+# actual computer name). The destination folder is created automatically
+# if it doesn't exist. A temporary HTML file is written alongside it and
+# then removed.
+
+function ConvertTo-SafeHtml {
+    param([string]$Text)
+    if ($null -eq $Text) { return '' }
+    return $Text.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;')
+}
+
+function Get-EdgePath {
+    $candidates = @(
+        "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+        "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+    )
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path -Path $c)) { return $c }
+    }
+    $onPath = Get-Command -Name "msedge.exe" -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+    return $null
+}
+
+function Export-BuildReportPdf {
     param(
         [Parameter(Mandatory = $true)]
         [object[]]$Results,
 
-        [string]$Path = "C:\hilb\$($env:COMPUTERNAME)_build_report.csv"
+        [string]$Path = "C:\hilb\$($env:COMPUTERNAME)_build_report.pdf"
     )
+
+    $edgePath = Get-EdgePath
+    if (-not $edgePath) {
+        Write-Host "Microsoft Edge not found - cannot render PDF. Skipping PDF export." -ForegroundColor Yellow
+        return
+    }
 
     $folder = Split-Path -Path $Path -Parent
     if ($folder -and -not (Test-Path -Path $folder)) {
         New-Item -ItemType Directory -Path $folder -Force | Out-Null
     }
 
-    $Results | Export-Csv -Path $Path -NoTypeInformation
-    Write-Host "Build report exported to: $Path" -ForegroundColor Cyan
+    # --- Build the HTML report body -----------------------------------
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine("<html><head><meta charset='utf-8'><style>")
+    [void]$sb.AppendLine("body { font-family: Consolas, 'Courier New', monospace; font-size: 11pt; margin: 24px; }")
+    [void]$sb.AppendLine("h1 { font-size: 16pt; color: #0b5394; margin-bottom: 4px; }")
+    [void]$sb.AppendLine("h2 { font-size: 13pt; color: #0b5394; margin-top: 22px; border-bottom: 1px solid #ccc; }")
+    [void]$sb.AppendLine(".ok { color: #1a7f37; }")
+    [void]$sb.AppendLine(".issue { color: #c62828; }")
+    [void]$sb.AppendLine(".skipped { color: #a67c00; }")
+    [void]$sb.AppendLine(".appname { color: #000000; }")
+    [void]$sb.AppendLine(".line { margin: 3px 0; white-space: pre-wrap; }")
+    [void]$sb.AppendLine(".meta { color: #555; font-size: 9pt; margin-bottom: 10px; }")
+    [void]$sb.AppendLine("</style></head><body>")
+
+    $reportTitle = "Build Report - $($env:COMPUTERNAME)"
+    $generatedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    [void]$sb.AppendLine("<h1>$(ConvertTo-SafeHtml $reportTitle)</h1>")
+    [void]$sb.AppendLine("<div class='meta'>Generated: $(ConvertTo-SafeHtml $generatedAt)</div>")
+
+    [void]$sb.AppendLine("<h2>Application Installation Status</h2>")
+    foreach ($group in $grouped) {
+        $entries = $group.Group
+        if ($entries[0].Installed) {
+            $entry = $entries | Sort-Object { ($_.Version | Out-String).Trim().Length } -Descending | Select-Object -First 1
+            $displayRequestedName = if ($FriendlyNames.ContainsKey($entry.RequestedApp)) { $FriendlyNames[$entry.RequestedApp] } else { $entry.RequestedApp }
+            $versionText = if ($entry.Version) { $entry.Version } else { "(version unknown)" }
+            $nameText = if ($entry.DisplayName -eq $entry.RequestedApp -or $entry.DisplayName.StartsWith($entry.RequestedApp, [System.StringComparison]::OrdinalIgnoreCase)) { $displayRequestedName } else { "$displayRequestedName -> $($entry.DisplayName)" }
+            [void]$sb.AppendLine("<div class='line'><span class='ok'>[INSTALLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $nameText)  |  Version: $(ConvertTo-SafeHtml $versionText)</span></div>")
+        }
+        else {
+            $displayMissingName = if ($FriendlyNames.ContainsKey($group.Name)) { $FriendlyNames[$group.Name] } else { $group.Name }
+            [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $displayMissingName)  |  Not found on this system</span></div>")
+        }
+    }
+
+    [void]$sb.AppendLine("<h2>Additional System Checks</h2>")
+
+    # Chocolatey
+    if ($chocoResult.Installed) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[INSTALLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $chocoResult.RequestedApp) -> $(ConvertTo-SafeHtml $chocoResult.DisplayName)  |  Version: $(ConvertTo-SafeHtml $chocoResult.Version)</span></div>")
+    }
+    else {
+        [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $chocoResult.RequestedApp)  |  $(ConvertTo-SafeHtml $chocoResult.Detail)</span></div>")
+    }
+
+    # .NET 3.5
+    if ($netFxResult.Skipped) {
+        [void]$sb.AppendLine("<div class='line'><span class='skipped'>[SKIPPED]</span> <span class='appname'>$(ConvertTo-SafeHtml $netFxResult.RequestedApp)  |  $(ConvertTo-SafeHtml $netFxResult.DisplayName)  |  $(ConvertTo-SafeHtml $netFxResult.Detail)</span></div>")
+    }
+    elseif ($netFxResult.Installed -and $netFxResult.WasAlreadyEnabled) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $netFxResult.RequestedApp)  |  $(ConvertTo-SafeHtml $netFxResult.DisplayName)  |  $(ConvertTo-SafeHtml $netFxResult.Detail)</span></div>")
+    }
+    elseif ($netFxResult.Installed) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[ENABLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $netFxResult.RequestedApp)  |  $(ConvertTo-SafeHtml $netFxResult.DisplayName)  |  $(ConvertTo-SafeHtml $netFxResult.Detail)</span></div>")
+    }
+    else {
+        [void]$sb.AppendLine("<div class='line'><span class='issue'>[DISABLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $netFxResult.RequestedApp)  |  $(ConvertTo-SafeHtml $netFxResult.DisplayName)  |  $(ConvertTo-SafeHtml $netFxResult.Detail)</span></div>")
+    }
+
+    # Registry key
+    if ($regResult.Installed) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $regResult.RequestedApp)  |  $(ConvertTo-SafeHtml $regResult.Detail)</span></div>")
+    }
+    else {
+        [void]$sb.AppendLine("<div class='line'><span class='issue'>[ISSUE]</span> <span class='appname'>$(ConvertTo-SafeHtml $regResult.RequestedApp)  |  $(ConvertTo-SafeHtml $regResult.Detail)</span></div>")
+    }
+
+    # Hostname naming convention
+    if ($hostnameResult.Installed) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $hostnameResult.RequestedApp)  |  $(ConvertTo-SafeHtml $hostnameResult.DisplayName)  |  $(ConvertTo-SafeHtml $hostnameResult.Detail)</span></div>")
+    }
+    else {
+        [void]$sb.AppendLine("<div class='line'><span class='issue'>[ISSUE]</span> <span class='appname'>$(ConvertTo-SafeHtml $hostnameResult.RequestedApp)  |  $(ConvertTo-SafeHtml $hostnameResult.DisplayName)  |  $(ConvertTo-SafeHtml $hostnameResult.Detail)</span></div>")
+    }
+
+    # WiFi profile
+    if ($wifiResult.Installed) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[FOUND]</span> <span class='appname'>$(ConvertTo-SafeHtml $wifiResult.RequestedApp)  |  $(ConvertTo-SafeHtml $wifiResult.Detail)</span></div>")
+    }
+    else {
+        [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $wifiResult.RequestedApp)  |  $(ConvertTo-SafeHtml $wifiResult.Detail)</span></div>")
+    }
+
+    # Microsoft Store
+    if ($msStoreResult.Installed) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[INSTALLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $msStoreResult.RequestedApp)  |  Version: $(ConvertTo-SafeHtml $msStoreResult.Version)</span></div>")
+    }
+    else {
+        [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $msStoreResult.RequestedApp)  |  $(ConvertTo-SafeHtml $msStoreResult.Detail)</span></div>")
+    }
+
+    # Snipping Tool
+    if ($snipResult.Installed) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[INSTALLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $snipResult.RequestedApp)  |  $(ConvertTo-SafeHtml $snipResult.DisplayName)  |  Version: $(ConvertTo-SafeHtml $snipResult.Version)</span></div>")
+    }
+    else {
+        [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $snipResult.RequestedApp)  |  $(ConvertTo-SafeHtml $snipResult.Detail)</span></div>")
+    }
+
+    # Summary
+    [void]$sb.AppendLine("<h2>Summary</h2>")
+    [void]$sb.AppendLine("<div class='line'><span class='ok'>$installedCount apps installed</span> / <span class='issue'>$missingCount apps missing</span>&nbsp;&nbsp;|&nbsp;&nbsp;<span class='ok'>$($extraOk.Count) extra checks OK</span> / <span class='issue'>$($extraIssues.Count) extra checks need attention</span>$(if ($extraSkipped.Count -gt 0) { " / <span class='skipped'>$($extraSkipped.Count) skipped (needs elevation to check)</span>" })</div>")
+
+    [void]$sb.AppendLine("</body></html>")
+
+    $htmlPath = [System.IO.Path]::ChangeExtension($Path, ".html")
+    Set-Content -Path $htmlPath -Value $sb.ToString() -Encoding UTF8
+
+    # --- Render HTML to PDF via headless Edge --------------------------
+    $edgeArgs = @(
+        "--headless",
+        "--disable-gpu",
+        "--no-margins",
+        "--print-to-pdf=`"$Path`"",
+        "`"$htmlPath`""
+    )
+
+    try {
+        $proc = Start-Process -FilePath $edgePath -ArgumentList $edgeArgs -Wait -PassThru -WindowStyle Hidden
+        Start-Sleep -Seconds 1   # Edge can return slightly before the file is flushed to disk
+        if (Test-Path -Path $Path) {
+            Write-Host "Build report exported to: $Path" -ForegroundColor Cyan
+        }
+        else {
+            Write-Host "PDF export did not produce a file at $Path (Edge exit code: $($proc.ExitCode))." -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-Host "PDF export failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+    finally {
+        Remove-Item -Path $htmlPath -ErrorAction SilentlyContinue
+    }
 }
 
-Export-BuildReport -Results $results
+Export-BuildReportPdf -Results $results
+
+# ---------------------------------------------------------------------------
+# OPTIONAL / DISABLED - CSV export (kept as a fallback in case PDF rendering
+# via Edge isn't available on a given machine). Uncomment both the function
+# and the call below to also/instead export a CSV.
+# ---------------------------------------------------------------------------
+# function Export-BuildReport {
+#     param(
+#         [Parameter(Mandatory = $true)]
+#         [object[]]$Results,
+#
+#         [string]$Path = "C:\hilb\$($env:COMPUTERNAME)_build_report.csv"
+#     )
+#
+#     $folder = Split-Path -Path $Path -Parent
+#     if ($folder -and -not (Test-Path -Path $folder)) {
+#         New-Item -ItemType Directory -Path $folder -Force | Out-Null
+#     }
+#
+#     $Results | Export-Csv -Path $Path -NoTypeInformation
+#     Write-Host "Build report exported to: $Path" -ForegroundColor Cyan
+# }
+#
+# Export-BuildReport -Results $results
