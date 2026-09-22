@@ -41,7 +41,14 @@
     Part 9: Checks whether a .NET 10 runtime is installed, via
     "dotnet --list-runtimes". Check only - no remediation is attempted.
 
-    Part 10: Exports all results (apps + all extra checks) to a PDF report at
+    Part 10: If, and only if, every app and every additional check above
+    came back OK (nothing missing/disabled/issue - a [SKIPPED] check does
+    not block this), runs "dcu-cli.exe /applyUpdates -silent
+    -reboot=disable" to install any pending Dell updates without
+    rebooting the system, then reports whether it ran, succeeded, and
+    what (if anything) was applied.
+
+    Part 11: Exports all results (apps + all extra checks) to a PDF report at
     C:\hilb\HOSTNAME_build_report.pdf (HOSTNAME replaced with the device's
     actual hostname), rendered via Microsoft Edge's built-in headless
     print-to-PDF feature - no extra modules or Office required.
@@ -68,7 +75,7 @@
     - Enabling .NET Framework 3.5 (if it's not already enabled) DOES require
       an elevated/Administrator PowerShell session. If not elevated, the
       script will report the current state but skip the enable attempt.
-    - Part 10 writes a PDF report to C:\hilb\HOSTNAME_build_report.pdf on
+    - Part 11 writes a PDF report to C:\hilb\HOSTNAME_build_report.pdf on
       every run (HOSTNAME is the device's actual computer name), rendered
       via headless Microsoft Edge (--headless --print-to-pdf). Requires
       Edge to be present at its default install path or on PATH - it ships
@@ -101,7 +108,7 @@ $AppList = @(
     "Beyond Identity Authenticator"
     "AMS360 Client"
     "Microsoft 365 Apps for enterprise - en-us"
-    "Dialpad Machine-Wide Installer"
+    "Dialpad Deployment Tool"
     "Adobe Acrobat (64-bit)"
     "ImageRight Desktop"
     "Mimecast for Outlook 64-bit"
@@ -123,7 +130,7 @@ $FriendlyNames = @{
     "ScreenConnect Client (aeeac260f410d99c)" = "ScreenConnect - HILB"
     "ScreenConnect Client (3d8353d2b9161111)" = "ScreenConnect - RMM"
     "Microsoft 365 Apps for enterprise - en-us" = "Microsoft 365 Apps"
-    "Dialpad Machine-Wide Installer" = "Dialpad"
+    "Dialpad Deployment Tool" = "Dialpad"
     "Dell Command | Update for Windows Universal" = "Dell Command | Update"
 }
 
@@ -326,9 +333,10 @@ $hostnameResult = [PSCustomObject]@{
     CheckType    = 'Hostname'
     RequestedApp = 'Hostname naming convention'
     Installed    = $hostnameOk
+    Warning      = $hostnameBad
     DisplayName  = "Hostname: $hostnameValue"
     Version      = $null
-    Detail       = if ($hostnameOk) { "Does not contain 'SD-'" } else { "Contains 'SD-' - naming convention violation" }
+    Detail       = if ($hostnameOk) { "Does not contain 'SD-'" } else { "Contains 'SD-' - reminder to rename this PC before deployment" }
 }
 
 # ===========================================================================
@@ -682,7 +690,7 @@ if ($hostnameResult.Installed) {
     Write-Host "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" -ForegroundColor White -BackgroundColor Black
 }
 else {
-    Write-Host "[ISSUE]     " -ForegroundColor Red -NoNewline
+    Write-Host "[WARNING]   " -ForegroundColor Yellow -NoNewline
     Write-Host "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" -ForegroundColor White -BackgroundColor Black
 }
 
@@ -749,15 +757,116 @@ else {
 Write-Host ""
 
 # ===========================================================================
-# Summary
+# Summary counts (computed here since the Dell Command | Update gate below
+# needs them; the actual Summary line prints at the very bottom, after the
+# Dell Command | Update section).
 # ===========================================================================
 $installedCount = ($appLines | Where-Object { $_.Installed }).Count
 $missingCount    = ($appLines | Where-Object { -not $_.Installed }).Count
 $extraChecks     = @($netFxResult, $regResult, $hostnameResult, $wifiResult, $msStoreResult, $snipResult, $dotnet10Result)
 $extraSkipped    = $extraChecks | Where-Object { $_.Skipped -eq $true }
-$extraOk         = $extraChecks | Where-Object { -not $_.Skipped -and $_.Installed }
-$extraIssues     = $extraChecks | Where-Object { -not $_.Skipped -and -not $_.Installed }
+$extraWarnings   = $extraChecks | Where-Object { -not $_.Skipped -and $_.Warning -eq $true }
+$extraOk         = $extraChecks | Where-Object { -not $_.Skipped -and -not $_.Warning -and $_.Installed }
+$extraIssues     = $extraChecks | Where-Object { -not $_.Skipped -and -not $_.Warning -and -not $_.Installed }
 
+# ===========================================================================
+# PART 10 - Dell Command | Update: apply updates (gated on a clean run)
+# ===========================================================================
+# Only runs if every app and every additional system check came back OK -
+# i.e. $missingCount -eq 0 and $extraIssues.Count -eq 0. A [SKIPPED] check
+# (couldn't verify, e.g. .NET 3.5 without elevation) does NOT block this -
+# only a confirmed [MISSING]/[ISSUE]/[DISABLED] does. Runs
+# "dcu-cli.exe /applyUpdates -silent -reboot=disable" so updates are
+# installed but the system is never rebooted automatically.
+$allChecksPassed   = ($missingCount -eq 0 -and $extraIssues.Count -eq 0)
+$dcuRan            = $false
+$dcuSuccess        = $false
+$dcuRebootRequired = $false
+$dcuExitCode       = $null
+$dcuDetail         = $null
+
+if (-not $allChecksPassed) {
+    $dcuDetail = "Skipped - one or more app or system checks were not OK, so updates were not applied."
+}
+else {
+    $dcuCliPath = @(
+        "$env:ProgramFiles\Dell\CommandUpdate\dcu-cli.exe",
+        "${env:ProgramFiles(x86)}\Dell\CommandUpdate\dcu-cli.exe"
+    ) | Where-Object { Test-Path -Path $_ } | Select-Object -First 1
+
+    if (-not $dcuCliPath) {
+        $dcuDetail = "All checks passed, but dcu-cli.exe was not found at its default install paths - skipped apply."
+    }
+    else {
+        $dcuLogPath   = "C:\hilb\$($env:COMPUTERNAME)_dcu_apply.log"
+        $dcuLogFolder = Split-Path -Path $dcuLogPath -Parent
+        if ($dcuLogFolder -and -not (Test-Path -Path $dcuLogFolder)) {
+            New-Item -ItemType Directory -Path $dcuLogFolder -Force | Out-Null
+        }
+
+        try {
+            Write-Verbose "Running dcu-cli.exe /applyUpdates -reboot=disable ..."
+            Write-Host ""
+            Write-Host "Dell Command | Update is now scanning and applying updates - this can take several minutes depending on what's pending (BIOS/firmware updates in particular are slow). Please wait..." -ForegroundColor Cyan
+            $dcuArgs = @(
+                "/applyUpdates",
+                "-silent",
+                "-reboot=disable",
+                "-outputLog=`"$dcuLogPath`""
+            )
+            $dcuProc = Start-Process -FilePath $dcuCliPath -ArgumentList $dcuArgs -Wait -PassThru -WindowStyle Hidden
+            $dcuRan      = $true
+            $dcuExitCode = $dcuProc.ExitCode
+            Write-Host "Dell Command | Update finished (exit code $dcuExitCode)." -ForegroundColor Cyan
+            Write-Host ""
+
+            switch ($dcuExitCode) {
+                0       { $dcuSuccess = $true; $dcuDetail = "Updates applied successfully." }
+                1       { $dcuSuccess = $true; $dcuRebootRequired = $true; $dcuDetail = "Updates applied successfully - a reboot is required to complete installation." }
+                500     { $dcuSuccess = $true; $dcuDetail = "No updates were found - system is already up to date." }
+                4       { $dcuDetail = "dcu-cli was not launched with administrative privileges." }
+                5       { $dcuDetail = "A reboot was already pending from a previous operation before this run." }
+                6       { $dcuDetail = "Another instance of Dell Command | Update (UI or CLI) was already running." }
+                default { $dcuDetail = "dcu-cli exited with code $dcuExitCode." }
+            }
+        }
+        catch {
+            $dcuDetail = "Failed to launch dcu-cli.exe: $($_.Exception.Message)"
+        }
+    }
+}
+
+$dcuApplyResult = [PSCustomObject]@{
+    CheckType      = 'Dell Command Update'
+    RequestedApp   = 'Dell Command | Update - Apply Updates'
+    Ran            = $dcuRan
+    Success        = $dcuSuccess
+    RebootRequired = $dcuRebootRequired
+    ExitCode       = $dcuExitCode
+    Detail         = $dcuDetail
+}
+
+$results += @($dcuApplyResult)
+
+Write-Host "Dell Command | Update - Apply Updates" -ForegroundColor Cyan
+Write-Host "======================================" -ForegroundColor Cyan
+if (-not $allChecksPassed -or -not $dcuApplyResult.Ran) {
+    Write-Host "[SKIPPED]   " -ForegroundColor Yellow -NoNewline
+    Write-Host "$($dcuApplyResult.Detail)" -ForegroundColor White -BackgroundColor Black
+}
+elseif ($dcuApplyResult.Success) {
+    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
+    Write-Host "$($dcuApplyResult.Detail)" -ForegroundColor White -BackgroundColor Black
+}
+else {
+    Write-Host "[ISSUE]     " -ForegroundColor Red -NoNewline
+    Write-Host "$($dcuApplyResult.Detail) (exit code $($dcuApplyResult.ExitCode))" -ForegroundColor White -BackgroundColor Black
+}
+Write-Host ""
+
+# ===========================================================================
+# Summary (printed last, at the bottom of the console output)
+# ===========================================================================
 Write-Host "Summary: " -NoNewline
 Write-Host "$installedCount apps installed" -ForegroundColor Green -NoNewline
 Write-Host " / " -NoNewline
@@ -766,6 +875,10 @@ Write-Host "   |   " -NoNewline
 Write-Host "$($extraOk.Count) extra checks OK" -ForegroundColor Green -NoNewline
 Write-Host " / " -NoNewline
 Write-Host "$($extraIssues.Count) extra checks need attention" -ForegroundColor Red -NoNewline
+if ($extraWarnings.Count -gt 0) {
+    Write-Host " / " -NoNewline
+    Write-Host "$($extraWarnings.Count) warnings" -ForegroundColor Yellow -NoNewline
+}
 if ($extraSkipped.Count -gt 0) {
     Write-Host " / " -NoNewline
     Write-Host "$($extraSkipped.Count) skipped (needs elevation to check)" -ForegroundColor Yellow -NoNewline
@@ -779,7 +892,7 @@ if (-not $isAdmin) {
 }
 
 # ===========================================================================
-# PART 10 - Export all results to a PDF report (via headless Microsoft Edge)
+# PART 11 - Export all results to a PDF report (via headless Microsoft Edge)
 # ===========================================================================
 # Builds an HTML version of everything shown in the console above, then
 # renders it to PDF using Microsoft Edge's built-in headless "print to PDF"
@@ -903,7 +1016,7 @@ function Export-BuildReportPdf {
         [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $hostnameResult.RequestedApp)  |  $(ConvertTo-SafeHtml $hostnameResult.DisplayName)  |  $(ConvertTo-SafeHtml $hostnameResult.Detail)</span></div>")
     }
     else {
-        [void]$sb.AppendLine("<div class='line'><span class='issue'>[ISSUE]</span> <span class='appname'>$(ConvertTo-SafeHtml $hostnameResult.RequestedApp)  |  $(ConvertTo-SafeHtml $hostnameResult.DisplayName)  |  $(ConvertTo-SafeHtml $hostnameResult.Detail)</span></div>")
+        [void]$sb.AppendLine("<div class='line'><span class='skipped'>[WARNING]</span> <span class='appname'>$(ConvertTo-SafeHtml $hostnameResult.RequestedApp)  |  $(ConvertTo-SafeHtml $hostnameResult.DisplayName)  |  $(ConvertTo-SafeHtml $hostnameResult.Detail)</span></div>")
     }
 
     # WiFi profile
@@ -944,9 +1057,21 @@ function Export-BuildReportPdf {
         [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $dotnet10Result.RequestedApp)  |  $(ConvertTo-SafeHtml $dotnet10Result.Detail)</span></div>")
     }
 
-    # Summary
+    # Dell Command | Update - Apply Updates
+    [void]$sb.AppendLine("<h2>Dell Command | Update - Apply Updates</h2>")
+    if (-not $allChecksPassed -or -not $dcuApplyResult.Ran) {
+        [void]$sb.AppendLine("<div class='line'><span class='skipped'>[SKIPPED]</span> <span class='appname'>$(ConvertTo-SafeHtml $dcuApplyResult.Detail)</span></div>")
+    }
+    elseif ($dcuApplyResult.Success) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $dcuApplyResult.Detail)</span></div>")
+    }
+    else {
+        [void]$sb.AppendLine("<div class='line'><span class='issue'>[ISSUE]</span> <span class='appname'>$(ConvertTo-SafeHtml $dcuApplyResult.Detail) (exit code $(ConvertTo-SafeHtml $dcuApplyResult.ExitCode))</span></div>")
+    }
+
+    # Summary (printed last, at the bottom of the PDF)
     [void]$sb.AppendLine("<h2>Summary</h2>")
-    [void]$sb.AppendLine("<div class='line'><span class='ok'>$installedCount apps installed</span> / <span class='issue'>$missingCount apps missing</span>&nbsp;&nbsp;|&nbsp;&nbsp;<span class='ok'>$($extraOk.Count) extra checks OK</span> / <span class='issue'>$($extraIssues.Count) extra checks need attention</span>$(if ($extraSkipped.Count -gt 0) { " / <span class='skipped'>$($extraSkipped.Count) skipped (needs elevation to check)</span>" })</div>")
+    [void]$sb.AppendLine("<div class='line'><span class='ok'>$installedCount apps installed</span> / <span class='issue'>$missingCount apps missing</span>&nbsp;&nbsp;|&nbsp;&nbsp;<span class='ok'>$($extraOk.Count) extra checks OK</span> / <span class='issue'>$($extraIssues.Count) extra checks need attention</span>$(if ($extraWarnings.Count -gt 0) { " / <span class='skipped'>$($extraWarnings.Count) warnings</span>" })$(if ($extraSkipped.Count -gt 0) { " / <span class='skipped'>$($extraSkipped.Count) skipped (needs elevation to check)</span>" })</div>")
 
     [void]$sb.AppendLine("</body></html>")
 
