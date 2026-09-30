@@ -90,7 +90,16 @@ param(
     [Parameter(Position = 0)]
     [string[]]$AppNames,
 
-    [string]$CsvPath
+    [string]$CsvPath,
+
+    # 1 = Quick software check (apps, Chocolatey, .NET 3.5, .NET 10, Registry,
+    #     MS Store, Snipping Tool) - console only, no PDF, no WiFi/hostname
+    #     checks, no Dell Command | Update.
+    # 2 = Full verification - everything, including PDF export and the
+    #     Dell Command | Update apply-updates step.
+    # Leave unset to be prompted interactively when the script runs.
+    [ValidateSet(1, 2)]
+    [int]$Mode
 )
 
 # ===========================================================================
@@ -138,6 +147,35 @@ $FriendlyNames = @{
 # Are we elevated? (Needed for the .NET 3.5 enable step)
 # ---------------------------------------------------------------------------
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+
+# ---------------------------------------------------------------------------
+# Mode selection - quick check vs full verification
+# ---------------------------------------------------------------------------
+if (-not $Mode) {
+    Write-Host ""
+    Write-Host "Select an option:" -ForegroundColor Cyan
+    Write-Host "  1) Quick software check" -ForegroundColor White
+    Write-Host "     (Apps, Chocolatey, .NET 3.5, .NET 10, Registry, MS Store, Snipping Tool)" -ForegroundColor White
+    Write-Host "     Console output only - no PDF, no hostname/WiFi checks, no Dell Command | Update." -ForegroundColor White
+    Write-Host "  2) Full verification" -ForegroundColor White
+    Write-Host "     Everything - all checks, Dell Command | Update apply, and PDF export." -ForegroundColor White
+    Write-Host ""
+
+    do {
+        $modeSelection = Read-Host "Enter 1 or 2"
+    } while ($modeSelection -notin @('1', '2'))
+
+    $Mode = [int]$modeSelection
+}
+
+if ($Mode -eq 1) {
+    Write-Host ""
+    Write-Host "Running Option 1: Quick software check" -ForegroundColor Cyan
+}
+else {
+    Write-Host ""
+    Write-Host "Running Option 2: Full verification" -ForegroundColor Cyan
+}
 
 # ---------------------------------------------------------------------------
 # Build the list of app names to check
@@ -684,24 +722,27 @@ else {
     Write-Host "$($regResult.RequestedApp)  |  $($regResult.Detail)" -ForegroundColor White -BackgroundColor Black
 }
 
-# Hostname naming convention
-if ($hostnameResult.Installed) {
-    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
-    Write-Host "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" -ForegroundColor White -BackgroundColor Black
-}
-else {
-    Write-Host "[WARNING]   " -ForegroundColor Yellow -NoNewline
-    Write-Host "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" -ForegroundColor White -BackgroundColor Black
-}
+# Hostname naming convention and WiFi profile - full verification (Option 2)
+# only. Both are still computed above regardless of mode (they're cheap,
+# no remediation/waiting involved) but are only reported in Option 2.
+if ($Mode -eq 2) {
+    if ($hostnameResult.Installed) {
+        Write-Host "[OK]        " -ForegroundColor Green -NoNewline
+        Write-Host "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    }
+    else {
+        Write-Host "[WARNING]   " -ForegroundColor Yellow -NoNewline
+        Write-Host "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    }
 
-# WiFi profile
-if ($wifiResult.Installed) {
-    Write-Host "[FOUND]     " -ForegroundColor Green -NoNewline
-    Write-Host "$($wifiResult.RequestedApp)  |  $($wifiResult.Detail)" -ForegroundColor White -BackgroundColor Black
-}
-else {
-    Write-Host "[MISSING]   " -ForegroundColor Red -NoNewline
-    Write-Host "$($wifiResult.RequestedApp)  |  $($wifiResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    if ($wifiResult.Installed) {
+        Write-Host "[FOUND]     " -ForegroundColor Green -NoNewline
+        Write-Host "$($wifiResult.RequestedApp)  |  $($wifiResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    }
+    else {
+        Write-Host "[MISSING]   " -ForegroundColor Red -NoNewline
+        Write-Host "$($wifiResult.RequestedApp)  |  $($wifiResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    }
 }
 
 # Microsoft Store
@@ -763,7 +804,10 @@ Write-Host ""
 # ===========================================================================
 $installedCount = ($appLines | Where-Object { $_.Installed }).Count
 $missingCount    = ($appLines | Where-Object { -not $_.Installed }).Count
-$extraChecks     = @($netFxResult, $regResult, $hostnameResult, $wifiResult, $msStoreResult, $snipResult, $dotnet10Result)
+$extraChecks     = @($netFxResult, $regResult, $msStoreResult, $snipResult, $dotnet10Result)
+if ($Mode -eq 2) {
+    $extraChecks += @($hostnameResult, $wifiResult)
+}
 $extraSkipped    = $extraChecks | Where-Object { $_.Skipped -eq $true }
 $extraWarnings   = $extraChecks | Where-Object { -not $_.Skipped -and $_.Warning -eq $true }
 $extraOk         = $extraChecks | Where-Object { -not $_.Skipped -and -not $_.Warning -and $_.Installed }
@@ -772,12 +816,14 @@ $extraIssues     = $extraChecks | Where-Object { -not $_.Skipped -and -not $_.Wa
 # ===========================================================================
 # PART 10 - Dell Command | Update: apply updates (gated on a clean run)
 # ===========================================================================
-# Only runs if every app and every additional system check came back OK -
-# i.e. $missingCount -eq 0 and $extraIssues.Count -eq 0. A [SKIPPED] check
+# Only runs in Option 2 (full verification) - and even then, only if every
+# app and every additional system check came back OK, i.e.
+# $missingCount -eq 0 and $extraIssues.Count -eq 0. A [SKIPPED] check
 # (couldn't verify, e.g. .NET 3.5 without elevation) does NOT block this -
 # only a confirmed [MISSING]/[ISSUE]/[DISABLED] does. Runs
 # "dcu-cli.exe /applyUpdates -silent -reboot=disable" so updates are
 # installed but the system is never rebooted automatically.
+if ($Mode -eq 2) {
 $allChecksPassed   = ($missingCount -eq 0 -and $extraIssues.Count -eq 0)
 $dcuRan            = $false
 $dcuSuccess        = $false
@@ -863,6 +909,7 @@ else {
     Write-Host "$($dcuApplyResult.Detail) (exit code $($dcuApplyResult.ExitCode))" -ForegroundColor White -BackgroundColor Black
 }
 Write-Host ""
+}
 
 # ===========================================================================
 # Summary (printed last, at the bottom of the console output)
@@ -1105,7 +1152,12 @@ function Export-BuildReportPdf {
     }
 }
 
-Export-BuildReportPdf -Results $results
+if ($Mode -eq 2) {
+    Export-BuildReportPdf -Results $results
+}
+else {
+    Write-Host "Quick software check complete - no PDF generated (run Option 2 for the full verification and PDF report)." -ForegroundColor Cyan
+}
 
 # ---------------------------------------------------------------------------
 # OPTIONAL / DISABLED - CSV export (kept as a fallback in case PDF rendering
