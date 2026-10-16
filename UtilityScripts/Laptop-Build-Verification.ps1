@@ -204,21 +204,26 @@ $uninstallKeys = @(
     'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
 )
 
-Write-Verbose "Enumerating installed applications from registry..."
-
-$installed = foreach ($keyPath in $uninstallKeys) {
-    Get-ItemProperty -Path $keyPath -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName } |
-        Select-Object `
-            @{Name = 'DisplayName'; Expression = { $_.DisplayName } }, `
-            @{Name = 'DisplayVersion'; Expression = { $_.DisplayVersion } }, `
-            @{Name = 'Publisher'; Expression = { $_.Publisher } }, `
-            @{Name = 'InstallLocation'; Expression = { $_.InstallLocation } }, `
-            @{Name = 'InstallDate'; Expression = { $_.InstallDate } }
+function Get-InstalledAppsSnapshot {
+    # A fresh read of the uninstall registry keys, deduplicated. Pulled out
+    # into a function so it can be called again for the retry below without
+    # duplicating the query logic.
+    $snapshot = foreach ($keyPath in $uninstallKeys) {
+        Get-ItemProperty -Path $keyPath -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName } |
+            Select-Object `
+                @{Name = 'DisplayName'; Expression = { $_.DisplayName } }, `
+                @{Name = 'DisplayVersion'; Expression = { $_.DisplayVersion } }, `
+                @{Name = 'Publisher'; Expression = { $_.Publisher } }, `
+                @{Name = 'InstallLocation'; Expression = { $_.InstallLocation } }, `
+                @{Name = 'InstallDate'; Expression = { $_.InstallDate } }
+    }
+    # Deduplicate (same app can appear in multiple keys, e.g. 32-bit + 64-bit views)
+    return $snapshot | Sort-Object DisplayName, DisplayVersion -Unique
 }
 
-# Deduplicate (same app can appear in multiple keys, e.g. 32-bit + 64-bit views)
-$installed = $installed | Sort-Object DisplayName, DisplayVersion -Unique
+Write-Verbose "Enumerating installed applications from registry..."
+$installed = Get-InstalledAppsSnapshot
 
 $appResults = foreach ($name in $AppNames) {
     $matches = $installed | Where-Object { $_.DisplayName -like "*$name*" }
@@ -243,6 +248,54 @@ $appResults = foreach ($name in $AppNames) {
             DisplayName  = $null
             Version      = $null
             Detail       = $null
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Retry once for anything that came back missing. Registry entries can
+# briefly vanish mid-install/update (e.g. an agent re-registering itself),
+# so a single apparent miss isn't necessarily a real miss - wait 2 seconds
+# and take a fresh registry snapshot before calling it Missing for real.
+# ---------------------------------------------------------------------------
+$initiallyMissingNames = ($appResults | Where-Object { -not $_.Installed }).RequestedApp
+
+if ($initiallyMissingNames) {
+    Write-Verbose "Some apps showed as missing on the first pass - waiting 2 seconds and rechecking before finalizing..."
+    Start-Sleep -Seconds 2
+    $installedRetry = Get-InstalledAppsSnapshot
+
+    $appResults = foreach ($name in $AppNames) {
+        if ($name -notin $initiallyMissingNames) {
+            # Already confirmed installed on the first pass - keep those
+            # results as-is rather than re-querying everything.
+            $appResults | Where-Object { $_.RequestedApp -eq $name }
+            continue
+        }
+
+        $retryMatches = $installedRetry | Where-Object { $_.DisplayName -like "*$name*" }
+
+        if ($retryMatches) {
+            foreach ($m in $retryMatches) {
+                [PSCustomObject]@{
+                    CheckType    = 'Application'
+                    RequestedApp = $name
+                    Installed    = $true
+                    DisplayName  = $m.DisplayName
+                    Version      = $m.DisplayVersion
+                    Detail       = $null
+                }
+            }
+        }
+        else {
+            [PSCustomObject]@{
+                CheckType    = 'Application'
+                RequestedApp = $name
+                Installed    = $false
+                DisplayName  = $null
+                Version      = $null
+                Detail       = $null
+            }
         }
     }
 }
@@ -374,7 +427,7 @@ $hostnameResult = [PSCustomObject]@{
     Warning      = $hostnameBad
     DisplayName  = "Hostname: $hostnameValue"
     Version      = $null
-    Detail       = if ($hostnameOk) { "Does not contain 'SD-'" } else { "Contains 'SD-' - reminder to rename this PC before deployment" }
+    Detail       = if ($hostnameOk) { "Does not contain 'SD-'" } else { "Contains 'SD-'" }
 }
 
 # ===========================================================================
@@ -399,6 +452,7 @@ $wifiResult = [PSCustomObject]@{
     CheckType    = 'WiFi Profile'
     RequestedApp = "WiFi profile: $wifiProfileName"
     Installed    = $wifiFound
+    Warning      = -not $wifiFound
     DisplayName  = $null
     Version      = $null
     Detail       = $wifiDetail
@@ -740,7 +794,7 @@ if ($Mode -eq 2) {
         Write-Host "$($wifiResult.RequestedApp)  |  $($wifiResult.Detail)" -ForegroundColor White -BackgroundColor Black
     }
     else {
-        Write-Host "[MISSING]   " -ForegroundColor Red -NoNewline
+        Write-Host "[WARNING]   " -ForegroundColor Yellow -NoNewline
         Write-Host "$($wifiResult.RequestedApp)  |  $($wifiResult.Detail)" -ForegroundColor White -BackgroundColor Black
     }
 }
@@ -909,6 +963,71 @@ else {
     Write-Host "$($dcuApplyResult.Detail) (exit code $($dcuApplyResult.ExitCode))" -ForegroundColor White -BackgroundColor Black
 }
 Write-Host ""
+
+# ---------------------------------------------------------------------------
+# If the hostname matched the "SD-" filter earlier, offer to rename the PC
+# now that Dell Command | Update has finished. Renaming requires a reboot to
+# take effect, and (like any computer rename) requires an elevated session.
+# ---------------------------------------------------------------------------
+$renameSucceeded = $false
+$newHostnameValue = $null
+
+if ($hostnameResult.Warning) {
+    Write-Host "Reminder: this PC's hostname ($hostnameValue) contains 'SD-' and should be renamed." -ForegroundColor Yellow
+    $renameChoice = Read-Host "Would you like to rename it now? (y/n)"
+
+    if ($renameChoice -match '^(y|yes)$') {
+        if (-not $isAdmin) {
+            Write-Host "Cannot rename the computer - this session is not elevated. Re-run as Administrator to rename." -ForegroundColor Yellow
+        }
+        else {
+            $newHostname = Read-Host "Enter the new hostname"
+            if ([string]::IsNullOrWhiteSpace($newHostname)) {
+                Write-Host "No hostname entered - skipping rename." -ForegroundColor Yellow
+            }
+            else {
+                try {
+                    Rename-Computer -NewName $newHostname -Force -ErrorAction Stop
+                    Write-Host "Renamed to '$newHostname'. A restart is required for the change to take effect." -ForegroundColor Green
+                    $renameSucceeded  = $true
+                    $newHostnameValue = $newHostname
+                }
+                catch {
+                    Write-Host "Rename FAILED: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+        }
+    }
+    else {
+        Write-Host "Skipping rename - remember to rename this PC before deployment." -ForegroundColor Yellow
+    }
+    Write-Host ""
+}
+
+# ---------------------------------------------------------------------------
+# Final hostname status - printed here (and included in the PDF) so it's
+# clear exactly what the hostname is, or will become, before any reboot.
+# ---------------------------------------------------------------------------
+$finalHostnameStatus = if ($renameSucceeded) {
+    "Hostname: $hostnameValue -> will be renamed to '$newHostnameValue' after restart"
+}
+else {
+    "Hostname: $hostnameValue (unchanged)"
+}
+Write-Host "$finalHostnameStatus" -ForegroundColor Cyan
+Write-Host ""
+
+# ---------------------------------------------------------------------------
+# Reboot decision:
+#   - Dell Command | Update ran with NO updates AND hostname NOT renamed -> no reboot
+#   - Dell Command | Update ran with NO updates AND hostname renamed    -> reboot (20s delay)
+#   - Dell Command | Update ran WITH updates AND hostname NOT renamed   -> reboot (20s delay)
+#   - Dell Command | Update ran WITH updates AND hostname renamed       -> reboot (20s delay)
+# In short: reboot if either the hostname was renamed or updates were
+# actually applied (exit code 0/1 - NOT 500, which means "no updates found").
+# ---------------------------------------------------------------------------
+$dcuAppliedUpdates = ($dcuApplyResult.Success -and $dcuExitCode -ne 500)
+$shouldReboot      = ($renameSucceeded -or $dcuAppliedUpdates)
 }
 
 # ===========================================================================
@@ -1071,7 +1190,7 @@ function Export-BuildReportPdf {
         [void]$sb.AppendLine("<div class='line'><span class='ok'>[FOUND]</span> <span class='appname'>$(ConvertTo-SafeHtml $wifiResult.RequestedApp)  |  $(ConvertTo-SafeHtml $wifiResult.Detail)</span></div>")
     }
     else {
-        [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $wifiResult.RequestedApp)  |  $(ConvertTo-SafeHtml $wifiResult.Detail)</span></div>")
+        [void]$sb.AppendLine("<div class='line'><span class='skipped'>[WARNING]</span> <span class='appname'>$(ConvertTo-SafeHtml $wifiResult.RequestedApp)  |  $(ConvertTo-SafeHtml $wifiResult.Detail)</span></div>")
     }
 
     # Microsoft Store
@@ -1116,6 +1235,11 @@ function Export-BuildReportPdf {
         [void]$sb.AppendLine("<div class='line'><span class='issue'>[ISSUE]</span> <span class='appname'>$(ConvertTo-SafeHtml $dcuApplyResult.Detail) (exit code $(ConvertTo-SafeHtml $dcuApplyResult.ExitCode))</span></div>")
     }
 
+    # Hostname Status - shows the current hostname, or what it will become
+    # after restart if it was renamed during this run.
+    [void]$sb.AppendLine("<h2>Hostname Status</h2>")
+    [void]$sb.AppendLine("<div class='line'><span class='appname'>$(ConvertTo-SafeHtml $finalHostnameStatus)</span></div>")
+
     # Summary (printed last, at the bottom of the PDF)
     [void]$sb.AppendLine("<h2>Summary</h2>")
     [void]$sb.AppendLine("<div class='line'><span class='ok'>$installedCount apps installed</span> / <span class='issue'>$missingCount apps missing</span>&nbsp;&nbsp;|&nbsp;&nbsp;<span class='ok'>$($extraOk.Count) extra checks OK</span> / <span class='issue'>$($extraIssues.Count) extra checks need attention</span>$(if ($extraWarnings.Count -gt 0) { " / <span class='skipped'>$($extraWarnings.Count) warnings</span>" })$(if ($extraSkipped.Count -gt 0) { " / <span class='skipped'>$($extraSkipped.Count) skipped (needs elevation to check)</span>" })</div>")
@@ -1154,6 +1278,15 @@ function Export-BuildReportPdf {
 
 if ($Mode -eq 2) {
     Export-BuildReportPdf -Results $results
+
+    if ($shouldReboot) {
+        Write-Host "Rebooting in 20 seconds to finalize changes ($finalHostnameStatus)." -ForegroundColor Yellow
+        Write-Host "A Windows shutdown notice will appear - the tech can cancel it with 'shutdown /a' if needed." -ForegroundColor Yellow
+        shutdown.exe /r /t 20 /c "Hilb Group build script: rebooting to finalize changes ($finalHostnameStatus). Run 'shutdown /a' to cancel."
+    }
+    else {
+        Write-Host "No updates were applied and the hostname was not changed - no reboot needed." -ForegroundColor Cyan
+    }
 }
 else {
     Write-Host "Quick software check complete - no PDF generated (run Option 2 for the full verification and PDF report)." -ForegroundColor Cyan
