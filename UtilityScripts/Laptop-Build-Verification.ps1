@@ -106,13 +106,8 @@ param(
 
     [string]$CsvPath,
 
-    # 1 = Quick software check (apps, WinGet, .NET 3.5, .NET 10, Registry,
-    #     MS Store, Snipping Tool) - console only, no PDF, no WiFi/hostname
-    #     checks, no Dell Command | Update. Also lists any available WinGet
-    #     app updates, but does NOT apply them (that only happens in
-    #     Option 2).
-    # 2 = Full verification - everything, including PDF export and the
-    #     WinGet/Dell Command | Update apply-updates steps.
+    # 1 = Quick software check
+    # 2 = Full verification 
     # Leave unset to be prompted interactively when the script runs.
     [ValidateSet(1, 2)]
     [int]$Mode
