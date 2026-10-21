@@ -1258,6 +1258,7 @@ else {
                 0       { $dcuSuccess = $true; $dcuDetail = "Updates applied successfully." }
                 1       { $dcuSuccess = $true; $dcuRebootRequired = $true; $dcuDetail = "Updates applied successfully - a reboot is required to complete installation." }
                 500     { $dcuSuccess = $true; $dcuDetail = "No updates were found - system is already up to date." }
+                2       { $dcuDetail = "An unknown application error has occurred. Check DCU Log for more details." }
                 4       { $dcuDetail = "dcu-cli was not launched with administrative privileges." }
                 5       { $dcuDetail = "A reboot was already pending from a previous operation before this run." }
                 6       { $dcuDetail = "Another instance of Dell Command | Update (UI or CLI) was already running." }
