@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Checks installation status and version number for a list of applications,
-    plus Chocolatey presence, .NET Framework 3.5 status, an IPv6 registry
+    plus WinGet presence, .NET Framework 3.5 status, an IPv6 registry
     configuration, hostname naming convention, a required WiFi profile, and
     presence of the Microsoft Store and Snipping Tool.
 
@@ -10,8 +10,8 @@
     (64-bit, 32-bit/WOW6432Node, and per-user) for each application name in
     $AppList, using partial ("contains") matching on the display name.
 
-    Part 2: Checks for choco.exe under C:\ProgramData\chocolatey\ and reports
-    its version if present.
+    Part 2: Checks whether winget.exe is present on PATH and reports its
+    version if present.
 
     Part 3: Checks whether the .NET Framework 3.5 (NetFx3) Windows feature is
     enabled. If it is not enabled, this script will attempt to enable it
@@ -41,14 +41,28 @@
     Part 9: Checks whether a .NET 10 runtime is installed, via
     "dotnet --list-runtimes". Check only - no remediation is attempted.
 
-    Part 10: If, and only if, every app and every additional check above
-    came back OK (nothing missing/disabled/issue - a [SKIPPED] check does
-    not block this), runs "dcu-cli.exe /applyUpdates -silent
-    -reboot=disable" to install any pending Dell updates without
-    rebooting the system, then reports whether it ran, succeeded, and
-    what (if anything) was applied.
+    Part 10: In Option 2 only, creates a local administrator account named
+    "thgadmin" if it doesn't already exist (and adds it to Administrators
+    if it exists but isn't already a member) - requires an elevated
+    session. The password is entered interactively as a SecureString and
+    is never stored, logged, or hardcoded anywhere in this script. Runs
+    BEFORE WinGet (Part 11) and Dell Command | Update (Part 12) below, and
+    is NOT gated on the other checks passing.
 
-    Part 11: Exports all results (apps + all extra checks) to a PDF report at
+    Part 11: In Option 2 only, if and only if every app and every
+    additional check above came back OK (nothing missing/disabled/issue -
+    a [SKIPPED] check does not block this) and WinGet itself is present,
+    runs "winget upgrade --all --silent" to apply any available app
+    updates. Runs BEFORE Dell Command | Update (Part 12) below. In Option
+    1 (quick check), available WinGet updates are listed in the console
+    instead, but never applied.
+
+    Part 12: Under the same conditions as Part 11, runs
+    "dcu-cli.exe /applyUpdates -silent -reboot=disable" to install any
+    pending Dell updates without rebooting the system, then reports
+    whether it ran, succeeded, and what (if anything) was applied.
+
+    Part 13: Exports all results (apps + all extra checks) to a PDF report at
     C:\hilb\HOSTNAME_build_report.pdf (HOSTNAME replaced with the device's
     actual hostname), rendered via Microsoft Edge's built-in headless
     print-to-PDF feature - no extra modules or Office required.
@@ -75,7 +89,7 @@
     - Enabling .NET Framework 3.5 (if it's not already enabled) DOES require
       an elevated/Administrator PowerShell session. If not elevated, the
       script will report the current state but skip the enable attempt.
-    - Part 11 writes a PDF report to C:\hilb\HOSTNAME_build_report.pdf on
+    - Part 13 writes a PDF report to C:\hilb\HOSTNAME_build_report.pdf on
       every run (HOSTNAME is the device's actual computer name), rendered
       via headless Microsoft Edge (--headless --print-to-pdf). Requires
       Edge to be present at its default install path or on PATH - it ships
@@ -92,11 +106,13 @@ param(
 
     [string]$CsvPath,
 
-    # 1 = Quick software check (apps, Chocolatey, .NET 3.5, .NET 10, Registry,
+    # 1 = Quick software check (apps, WinGet, .NET 3.5, .NET 10, Registry,
     #     MS Store, Snipping Tool) - console only, no PDF, no WiFi/hostname
-    #     checks, no Dell Command | Update.
+    #     checks, no Dell Command | Update. Also lists any available WinGet
+    #     app updates, but does NOT apply them (that only happens in
+    #     Option 2).
     # 2 = Full verification - everything, including PDF export and the
-    #     Dell Command | Update apply-updates step.
+    #     WinGet/Dell Command | Update apply-updates steps.
     # Leave unset to be prompted interactively when the script runs.
     [ValidateSet(1, 2)]
     [int]$Mode
@@ -155,7 +171,8 @@ if (-not $Mode) {
     Write-Host ""
     Write-Host "Select an option:" -ForegroundColor Cyan
     Write-Host "  1) Quick software check" -ForegroundColor White
-    Write-Host "     (Apps, Chocolatey, .NET 3.5, .NET 10, Registry, MS Store, Snipping Tool)" -ForegroundColor White
+    Write-Host "     (Apps, WinGet, .NET 3.5, .NET 10, Registry, MS Store, Snipping Tool)" -ForegroundColor White
+    Write-Host "     Lists available WinGet updates but does not apply them." -ForegroundColor White
     Write-Host "     Console output only - no PDF, no hostname/WiFi checks, no Dell Command | Update." -ForegroundColor White
     Write-Host "  2) Full verification" -ForegroundColor White
     Write-Host "     Everything - all checks, Dell Command | Update apply, and PDF export." -ForegroundColor White
@@ -301,35 +318,74 @@ if ($initiallyMissingNames) {
 }
 
 # ===========================================================================
-# PART 2 - Chocolatey presence and version
+# PART 2 - WinGet presence and version (reinstall/re-register and recheck
+# if missing)
 # ===========================================================================
-$chocoPath = "C:\ProgramData\chocolatey\choco.exe"
-$chocoResult = if (Test-Path -Path $chocoPath) {
-    $chocoVersion = $null
+function Get-WingetStatus {
+    # Returns $null if not found, otherwise a hashtable with Path/Version.
+    $cmd = Get-Command -Name "winget.exe" -ErrorAction SilentlyContinue
+    if (-not $cmd) { return $null }
+
+    $version = $null
     try {
-        $chocoVersion = (Get-Item -Path $chocoPath).VersionInfo.ProductVersion
+        $versionRaw = & winget.exe --version 2>$null
+        $version = ($versionRaw | Select-Object -First 1).ToString().Trim()
     }
     catch {
-        $chocoVersion = "(version unknown)"
+        $version = "(version unknown)"
     }
-    [PSCustomObject]@{
-        CheckType    = 'Chocolatey'
-        RequestedApp = 'Chocolatey (choco.exe)'
-        Installed    = $true
-        DisplayName  = $chocoPath
-        Version      = $chocoVersion
-        Detail       = $null
+
+    return @{ Path = $cmd.Source; Version = $version }
+}
+
+$wingetStatus    = Get-WingetStatus
+$wingetInstalled = [bool]$wingetStatus
+$wingetVersion   = if ($wingetStatus) { $wingetStatus.Version } else { $null }
+$wingetPath      = if ($wingetStatus) { $wingetStatus.Path } else { $null }
+$wingetAction    = $null
+
+# Capture the state as first observed, before any remediation attempt below,
+# so we can distinguish "already present" from "restored during this run".
+$wingetWasAlreadyEnabled = $wingetInstalled
+
+if (-not $wingetInstalled) {
+    if (-not $isAdmin) {
+        $wingetAction = "Missing, and this session is not elevated - skipped reinstall attempt. Re-run as Administrator to restore."
+    }
+    else {
+        try {
+            Write-Verbose "Attempting to reinstall/re-register WinGet (Microsoft.DesktopAppInstaller)..."
+            Get-AppxPackage -AllUsers *Microsoft.DesktopAppInstaller* | ForEach-Object {
+                Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" -ErrorAction Stop
+            }
+            Write-Verbose "Waiting 2 minutes before rechecking WinGet..."
+            Start-Sleep -Seconds 120
+
+            $wingetStatus = Get-WingetStatus
+            if ($wingetStatus) {
+                $wingetInstalled = $true
+                $wingetVersion   = $wingetStatus.Version
+                $wingetPath      = $wingetStatus.Path
+                $wingetAction    = "Was missing - reinstall/re-register attempted during this run."
+            }
+            else {
+                $wingetAction = "Reinstall/re-register attempted, but WinGet is still missing after rechecking."
+            }
+        }
+        catch {
+            $wingetAction = "Reinstall/re-register attempt FAILED: $($_.Exception.Message)"
+        }
     }
 }
-else {
-    [PSCustomObject]@{
-        CheckType    = 'Chocolatey'
-        RequestedApp = 'Chocolatey (choco.exe)'
-        Installed    = $false
-        DisplayName  = $null
-        Version      = $null
-        Detail       = "Not found at $chocoPath"
-    }
+
+$wingetResult = [PSCustomObject]@{
+    CheckType        = 'WinGet'
+    RequestedApp     = 'WinGet (winget.exe)'
+    Installed        = $wingetInstalled
+    WasAlreadyEnabled = $wingetWasAlreadyEnabled
+    DisplayName      = $wingetPath
+    Version          = $wingetVersion
+    Detail           = $wingetAction
 }
 
 # ===========================================================================
@@ -406,7 +462,7 @@ catch {
 
 $regResult = [PSCustomObject]@{
     CheckType    = 'Registry'
-    RequestedApp = "$regName @ Tcpip6\Parameters"
+    RequestedApp = "Prefer IPv4 over IPv6"
     Installed    = $regOk
     DisplayName  = if ($null -ne $regActualValue) { "Current value: 0x{0:X}" -f $regActualValue } else { $null }
     Version      = $null
@@ -644,7 +700,7 @@ $dotnet10Result = [PSCustomObject]@{
 # ===========================================================================
 # Combine all results
 # ===========================================================================
-$results = @($appResults) + @($chocoResult) + @($netFxResult) + @($regResult) + `
+$results = @($appResults) + @($wingetResult) + @($netFxResult) + @($regResult) + `
            @($hostnameResult) + @($wifiResult) + @($msStoreResult) + @($snipResult) + `
            @($dotnet10Result)
 
@@ -708,15 +764,9 @@ $appLines = foreach ($group in $grouped) {
     }
 }
 
-# Chocolatey is a genuine installed application, but it doesn't register an
-# uninstall entry in the registry/Control Panel like the apps above, so it's
-# checked separately (Part 2) - fold its result into the same app list here
-# so it reports and aligns alongside everything else.
-$appLines += [PSCustomObject]@{
-    Installed   = $chocoResult.Installed
-    NameText    = $chocoResult.RequestedApp
-    VersionText = $chocoResult.Version
-}
+# Alphabetical order (case-insensitive) by displayed name, for both the
+# console and the PDF (which reuses this same sorted $appLines array).
+$appLines = $appLines | Sort-Object { $_.NameText.ToLowerInvariant() }
 
 $maxAppNameLength = ($appLines | ForEach-Object { $_.NameText.Length } | Measure-Object -Maximum).Maximum
 
@@ -740,40 +790,58 @@ Write-Host "Additional System Checks" -ForegroundColor Cyan
 Write-Host "=========================" -ForegroundColor Cyan
 Write-Host ""
 
-# .NET 3.5
-if ($netFxResult.Skipped) {
-    Write-Host "[SKIPPED]   " -ForegroundColor Yellow -NoNewline
-    $line = "$($netFxResult.RequestedApp)  |  $($netFxResult.DisplayName)"
-    if ($netFxResult.Detail) { $line += "  |  $($netFxResult.Detail)" }
-    Write-Host $line -ForegroundColor White -BackgroundColor Black
+# Build one entry per check (Tag/StatusClass/Body), rather than printing
+# directly, so the whole set can be sorted alphabetically before display.
+# StatusClass maps 1:1 to both a console color and a PDF CSS class:
+# 'ok' = Green, 'issue' = Red, 'skipped' = Yellow (used for both [SKIPPED]
+# and [WARNING] - a soft fail is still yellow). This same list is reused
+# later when building the PDF, so console and PDF always match.
+$additionalChecksDisplay = @()
+
+# WinGet
+if ($wingetResult.Installed -and $wingetResult.WasAlreadyEnabled) {
+    $line = "$($wingetResult.RequestedApp)"
+    if ($wingetResult.Version) { $line += "  |  Version: $($wingetResult.Version)" }
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $wingetResult.RequestedApp; Tag = "[OK]"; StatusClass = 'ok'; Body = $line }
 }
-elseif ($netFxResult.Installed -and $netFxResult.WasAlreadyEnabled) {
-    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
-    $line = "$($netFxResult.RequestedApp)  |  $($netFxResult.DisplayName)"
-    if ($netFxResult.Detail) { $line += "  |  $($netFxResult.Detail)" }
-    Write-Host $line -ForegroundColor White -BackgroundColor Black
-}
-elseif ($netFxResult.Installed) {
-    Write-Host "[ENABLED]   " -ForegroundColor Green -NoNewline
-    $line = "$($netFxResult.RequestedApp)  |  $($netFxResult.DisplayName)"
-    if ($netFxResult.Detail) { $line += "  |  $($netFxResult.Detail)" }
-    Write-Host $line -ForegroundColor White -BackgroundColor Black
+elseif ($wingetResult.Installed) {
+    $line = "$($wingetResult.RequestedApp)"
+    if ($wingetResult.Version) { $line += "  |  Version: $($wingetResult.Version)" }
+    if ($wingetResult.Detail)  { $line += "  |  $($wingetResult.Detail)" }
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $wingetResult.RequestedApp; Tag = "[ENABLED]"; StatusClass = 'ok'; Body = $line }
 }
 else {
-    Write-Host "[DISABLED]  " -ForegroundColor Red -NoNewline
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $wingetResult.RequestedApp; Tag = "[MISSING]"; StatusClass = 'issue'; Body = "$($wingetResult.RequestedApp)  |  $($wingetResult.Detail)" }
+}
+
+# .NET 3.5
+if ($netFxResult.Skipped) {
     $line = "$($netFxResult.RequestedApp)  |  $($netFxResult.DisplayName)"
     if ($netFxResult.Detail) { $line += "  |  $($netFxResult.Detail)" }
-    Write-Host $line -ForegroundColor White -BackgroundColor Black
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $netFxResult.RequestedApp; Tag = "[SKIPPED]"; StatusClass = 'skipped'; Body = $line }
+}
+elseif ($netFxResult.Installed -and $netFxResult.WasAlreadyEnabled) {
+    $line = "$($netFxResult.RequestedApp)  |  $($netFxResult.DisplayName)"
+    if ($netFxResult.Detail) { $line += "  |  $($netFxResult.Detail)" }
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $netFxResult.RequestedApp; Tag = "[OK]"; StatusClass = 'ok'; Body = $line }
+}
+elseif ($netFxResult.Installed) {
+    $line = "$($netFxResult.RequestedApp)  |  $($netFxResult.DisplayName)"
+    if ($netFxResult.Detail) { $line += "  |  $($netFxResult.Detail)" }
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $netFxResult.RequestedApp; Tag = "[ENABLED]"; StatusClass = 'ok'; Body = $line }
+}
+else {
+    $line = "$($netFxResult.RequestedApp)  |  $($netFxResult.DisplayName)"
+    if ($netFxResult.Detail) { $line += "  |  $($netFxResult.Detail)" }
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $netFxResult.RequestedApp; Tag = "[DISABLED]"; StatusClass = 'issue'; Body = $line }
 }
 
 # Registry key
 if ($regResult.Installed) {
-    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
-    Write-Host "$($regResult.RequestedApp)  |  $($regResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $regResult.RequestedApp; Tag = "[OK]"; StatusClass = 'ok'; Body = "$($regResult.RequestedApp)" }
 }
 else {
-    Write-Host "[ISSUE]     " -ForegroundColor Red -NoNewline
-    Write-Host "$($regResult.RequestedApp)  |  $($regResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $regResult.RequestedApp; Tag = "[ISSUE]"; StatusClass = 'issue'; Body = "$($regResult.RequestedApp)  |  $($regResult.Detail)" }
 }
 
 # Hostname naming convention and WiFi profile - full verification (Option 2)
@@ -781,72 +849,74 @@ else {
 # no remediation/waiting involved) but are only reported in Option 2.
 if ($Mode -eq 2) {
     if ($hostnameResult.Installed) {
-        Write-Host "[OK]        " -ForegroundColor Green -NoNewline
-        Write-Host "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" -ForegroundColor White -BackgroundColor Black
+        $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $hostnameResult.RequestedApp; Tag = "[OK]"; StatusClass = 'ok'; Body = "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" }
     }
     else {
-        Write-Host "[WARNING]   " -ForegroundColor Yellow -NoNewline
-        Write-Host "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" -ForegroundColor White -BackgroundColor Black
+        $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $hostnameResult.RequestedApp; Tag = "[WARNING]"; StatusClass = 'skipped'; Body = "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" }
     }
 
     if ($wifiResult.Installed) {
-        Write-Host "[FOUND]     " -ForegroundColor Green -NoNewline
-        Write-Host "$($wifiResult.RequestedApp)  |  $($wifiResult.Detail)" -ForegroundColor White -BackgroundColor Black
+        $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $wifiResult.RequestedApp; Tag = "[FOUND]"; StatusClass = 'ok'; Body = "$($wifiResult.RequestedApp)  |  $($wifiResult.Detail)" }
     }
     else {
-        Write-Host "[WARNING]   " -ForegroundColor Yellow -NoNewline
-        Write-Host "$($wifiResult.RequestedApp)  |  $($wifiResult.Detail)" -ForegroundColor White -BackgroundColor Black
+        $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $wifiResult.RequestedApp; Tag = "[WARNING]"; StatusClass = 'skipped'; Body = "$($wifiResult.RequestedApp)  |  $($wifiResult.Detail)" }
     }
 }
 
 # Microsoft Store
 if ($msStoreResult.Installed -and $msStoreResult.WasAlreadyEnabled) {
-    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
     $line = "$($msStoreResult.RequestedApp)"
     if ($msStoreResult.Version) { $line += "  |  Version: $($msStoreResult.Version)" }
-    Write-Host $line -ForegroundColor White -BackgroundColor Black
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $msStoreResult.RequestedApp; Tag = "[OK]"; StatusClass = 'ok'; Body = $line }
 }
 elseif ($msStoreResult.Installed) {
-    Write-Host "[ENABLED]   " -ForegroundColor Green -NoNewline
     $line = "$($msStoreResult.RequestedApp)"
     if ($msStoreResult.Version) { $line += "  |  Version: $($msStoreResult.Version)" }
     if ($msStoreResult.Detail)  { $line += "  |  $($msStoreResult.Detail)" }
-    Write-Host $line -ForegroundColor White -BackgroundColor Black
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $msStoreResult.RequestedApp; Tag = "[ENABLED]"; StatusClass = 'ok'; Body = $line }
 }
 else {
-    Write-Host "[MISSING]   " -ForegroundColor Red -NoNewline
-    Write-Host "$($msStoreResult.RequestedApp)  |  $($msStoreResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $msStoreResult.RequestedApp; Tag = "[MISSING]"; StatusClass = 'issue'; Body = "$($msStoreResult.RequestedApp)  |  $($msStoreResult.Detail)" }
 }
 
 # Snipping Tool
 if ($snipResult.Installed -and $snipResult.WasAlreadyEnabled) {
-    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
     $line = "$($snipResult.RequestedApp)"
     if ($snipResult.DisplayName) { $line += "  |  $($snipResult.DisplayName)" }
     if ($snipResult.Version)     { $line += "  |  Version: $($snipResult.Version)" }
-    Write-Host $line -ForegroundColor White -BackgroundColor Black
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $snipResult.RequestedApp; Tag = "[OK]"; StatusClass = 'ok'; Body = $line }
 }
 elseif ($snipResult.Installed) {
-    Write-Host "[ENABLED]   " -ForegroundColor Green -NoNewline
     $line = "$($snipResult.RequestedApp)"
     if ($snipResult.DisplayName) { $line += "  |  $($snipResult.DisplayName)" }
     if ($snipResult.Version)     { $line += "  |  Version: $($snipResult.Version)" }
     if ($snipResult.Detail)      { $line += "  |  $($snipResult.Detail)" }
-    Write-Host $line -ForegroundColor White -BackgroundColor Black
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $snipResult.RequestedApp; Tag = "[ENABLED]"; StatusClass = 'ok'; Body = $line }
 }
 else {
-    Write-Host "[MISSING]   " -ForegroundColor Red -NoNewline
-    Write-Host "$($snipResult.RequestedApp)  |  $($snipResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $snipResult.RequestedApp; Tag = "[MISSING]"; StatusClass = 'issue'; Body = "$($snipResult.RequestedApp)  |  $($snipResult.Detail)" }
 }
 
 # .NET 10
 if ($dotnet10Result.Installed) {
-    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
-    Write-Host "$($dotnet10Result.RequestedApp)  |  Version: $($dotnet10Result.Version)" -ForegroundColor White -BackgroundColor Black
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $dotnet10Result.RequestedApp; Tag = "[OK]"; StatusClass = 'ok'; Body = "$($dotnet10Result.RequestedApp)  |  Version: $($dotnet10Result.Version)" }
 }
 else {
-    Write-Host "[MISSING]   " -ForegroundColor Red -NoNewline
-    Write-Host "$($dotnet10Result.RequestedApp)  |  $($dotnet10Result.Detail)" -ForegroundColor White -BackgroundColor Black
+    $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $dotnet10Result.RequestedApp; Tag = "[MISSING]"; StatusClass = 'issue'; Body = "$($dotnet10Result.RequestedApp)  |  $($dotnet10Result.Detail)" }
+}
+
+# Alphabetical order (case-insensitive), then print
+$additionalChecksDisplay = $additionalChecksDisplay | Sort-Object { $_.SortKey.ToLowerInvariant() }
+
+foreach ($entry in $additionalChecksDisplay) {
+    $tagColor = switch ($entry.StatusClass) {
+        'ok'      { 'Green' }
+        'issue'   { 'Red' }
+        'skipped' { 'Yellow' }
+    }
+    $paddedTag = $entry.Tag.PadRight(12)
+    Write-Host $paddedTag -ForegroundColor $tagColor -NoNewline
+    Write-Host $entry.Body -ForegroundColor White -BackgroundColor Black
 }
 
 Write-Host ""
@@ -858,7 +928,7 @@ Write-Host ""
 # ===========================================================================
 $installedCount = ($appLines | Where-Object { $_.Installed }).Count
 $missingCount    = ($appLines | Where-Object { -not $_.Installed }).Count
-$extraChecks     = @($netFxResult, $regResult, $msStoreResult, $snipResult, $dotnet10Result)
+$extraChecks     = @($wingetResult, $netFxResult, $regResult, $msStoreResult, $snipResult, $dotnet10Result)
 if ($Mode -eq 2) {
     $extraChecks += @($hostnameResult, $wifiResult)
 }
@@ -868,7 +938,276 @@ $extraOk         = $extraChecks | Where-Object { -not $_.Skipped -and -not $_.Wa
 $extraIssues     = $extraChecks | Where-Object { -not $_.Skipped -and -not $_.Warning -and -not $_.Installed }
 
 # ===========================================================================
-# PART 10 - Dell Command | Update: apply updates (gated on a clean run)
+# PART 10 - Local admin account: create "thgadmin" if it doesn't exist
+# ===========================================================================
+# Runs in Option 2, BEFORE WinGet (Part 11) and Dell Command | Update
+# (Part 12) below. Unlike those two steps, this is NOT gated on the other
+# checks passing - it's treated as a standard provisioning step rather than
+# a conditional remediation. Requires an elevated session.
+#
+# The password is entered interactively as a SecureString - it is never
+# stored, logged, written to disk, or hardcoded anywhere in this script.
+# If the account already exists, its password is left untouched; the script
+# only makes sure it's a member of Administrators.
+if ($Mode -eq 2) {
+$localAdminUsername      = "thgadmin"
+$localAdminRan           = $false
+$localAdminSuccess       = $false
+$localAdminAlreadyExisted = $false
+$localAdminDetail        = $null
+
+if (-not $isAdmin) {
+    $localAdminDetail = "Skipped - this session is not elevated. Re-run as Administrator to create the local admin account."
+}
+else {
+    $existingLocalAdmin = Get-LocalUser -Name $localAdminUsername -ErrorAction SilentlyContinue
+
+    if ($existingLocalAdmin) {
+        $localAdminRan            = $true
+        $localAdminAlreadyExisted = $true
+        try {
+            $isAlreadyAdminMember = (Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop) |
+                Where-Object { $_.Name -like "*\$localAdminUsername" -or $_.Name -eq $localAdminUsername }
+
+            if (-not $isAlreadyAdminMember) {
+                Add-LocalGroupMember -Group "Administrators" -Member $localAdminUsername -ErrorAction Stop
+                $localAdminDetail = "Account '$localAdminUsername' already existed - was not in Administrators, so it was added. Password left unchanged."
+            }
+            else {
+                $localAdminDetail = "Account '$localAdminUsername' already exists and is already an Administrator - left unchanged."
+            }
+            $localAdminSuccess = $true
+        }
+        catch {
+            $localAdminDetail = "Account '$localAdminUsername' already exists, but checking/updating its Administrators membership FAILED: $($_.Exception.Message)"
+        }
+    }
+    else {
+        Write-Host ""
+        Write-Host "Creating local admin account '$localAdminUsername'." -ForegroundColor Cyan
+        Write-Host "Enter a password for this account now - it is used only in this session and is never stored, logged, or written to disk." -ForegroundColor Cyan
+
+        $localAdminPassword = $null
+        $passwordsMatch = $false
+
+        while (-not $passwordsMatch) {
+            $pw1 = Read-Host -AsSecureString -Prompt "New password for $localAdminUsername"
+            $pw2 = Read-Host -AsSecureString -Prompt "Confirm password"
+
+            $pw1Ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pw1)
+            $pw2Ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pw2)
+            $pw1Plain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($pw1Ptr)
+            $pw2Plain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($pw2Ptr)
+
+            if (-not [string]::IsNullOrEmpty($pw1Plain) -and $pw1Plain -ceq $pw2Plain) {
+                $passwordsMatch = $true
+                $localAdminPassword = $pw1
+            }
+            else {
+                Write-Host "Passwords did not match (or were empty) - try again." -ForegroundColor Yellow
+            }
+
+            # Clear plaintext copies from memory as soon as they've been compared
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pw1Ptr)
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pw2Ptr)
+            $pw1Plain = $null
+            $pw2Plain = $null
+        }
+
+        try {
+            New-LocalUser -Name $localAdminUsername -Password $localAdminPassword -FullName "THG Admin" -Description "Local admin account created by build script" -AccountNeverExpires -ErrorAction Stop | Out-Null
+            Add-LocalGroupMember -Group "Administrators" -Member $localAdminUsername -ErrorAction Stop
+
+            $localAdminRan     = $true
+            $localAdminSuccess = $true
+            $localAdminDetail  = "Account '$localAdminUsername' created and added to Administrators."
+        }
+        catch {
+            $localAdminDetail = "FAILED to create/configure '$localAdminUsername': $($_.Exception.Message)"
+        }
+        finally {
+            # Drop the reference to the SecureString now that we're done with it
+            $localAdminPassword = $null
+        }
+        Write-Host ""
+    }
+}
+
+$localAdminResult = [PSCustomObject]@{
+    CheckType      = 'Local Admin Account'
+    RequestedApp   = "Local admin account ($localAdminUsername)"
+    Ran            = $localAdminRan
+    Success        = $localAdminSuccess
+    AlreadyExisted = $localAdminAlreadyExisted
+    Detail         = $localAdminDetail
+}
+
+$results += @($localAdminResult)
+
+Write-Host "Local Admin Account" -ForegroundColor Cyan
+Write-Host "====================" -ForegroundColor Cyan
+if (-not $localAdminResult.Ran) {
+    Write-Host "[SKIPPED]   " -ForegroundColor Yellow -NoNewline
+    Write-Host "$($localAdminResult.Detail)" -ForegroundColor White -BackgroundColor Black
+}
+elseif ($localAdminResult.Success) {
+    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
+    Write-Host "$($localAdminResult.Detail)" -ForegroundColor White -BackgroundColor Black
+}
+else {
+    Write-Host "[ISSUE]     " -ForegroundColor Red -NoNewline
+    Write-Host "$($localAdminResult.Detail)" -ForegroundColor White -BackgroundColor Black
+}
+Write-Host ""
+}
+
+# ===========================================================================
+# PART 11 - WinGet: apply available updates (gated on a clean run)
+# ===========================================================================
+# Only runs in Option 2 (full verification), only if every app and every
+# additional system check came back OK (same gate as Dell Command | Update
+# below), and only if WinGet itself is actually present and working. First
+# lists what currently has an update available (so we can name names in the
+# report), then runs "winget upgrade --all" unattended, before Dell Command
+# | Update, so app updates land before the Dell driver/firmware pass.
+function Get-WingetPendingUpgradeNames {
+    # Parses "winget upgrade" text-table output to pull out just the Name
+    # column. Best-effort: winget's table is fixed-width, not a structured
+    # format, so this relies on the header row's column positions. Returns
+    # an empty array (never throws) if the output doesn't look as expected.
+    try {
+        $raw = & winget.exe upgrade --accept-source-agreements 2>$null
+    }
+    catch {
+        return @()
+    }
+    if (-not $raw) { return @() }
+
+    $headerIndex = -1
+    for ($i = 0; $i -lt $raw.Count; $i++) {
+        if ($raw[$i] -match '^Name\s+Id\s+Version') {
+            $headerIndex = $i
+            break
+        }
+    }
+    if ($headerIndex -lt 0) { return @() }
+
+    $idColumnStart = $raw[$headerIndex].IndexOf('Id')
+    if ($idColumnStart -lt 0) { return @() }
+
+    $names = @()
+    for ($i = $headerIndex + 2; $i -lt $raw.Count; $i++) {
+        $line = $raw[$i]
+        if ([string]::IsNullOrWhiteSpace($line)) { break }
+        if ($line.Length -lt $idColumnStart) { continue }
+        $name = $line.Substring(0, $idColumnStart).Trim()
+        if ($name) { $names += $name }
+    }
+    return $names
+}
+
+if ($Mode -eq 2) {
+$allChecksPassed = ($missingCount -eq 0 -and $extraIssues.Count -eq 0)
+
+$wingetUpgradeRan      = $false
+$wingetUpgradeSuccess  = $false
+$wingetUpgradeExitCode = $null
+$wingetUpgradeDetail   = $null
+$wingetPendingNames    = @()
+
+if (-not $allChecksPassed) {
+    $wingetUpgradeDetail = "Skipped - one or more app or system checks were not OK, so updates were not applied."
+}
+elseif (-not $wingetResult.Installed) {
+    $wingetUpgradeDetail = "Skipped - WinGet is not available on this system."
+}
+else {
+    Write-Verbose "Checking for available WinGet upgrades..."
+    $wingetPendingNames = Get-WingetPendingUpgradeNames
+
+    if (-not $wingetPendingNames -or $wingetPendingNames.Count -eq 0) {
+        $wingetUpgradeRan     = $true
+        $wingetUpgradeSuccess = $true
+        $wingetUpgradeDetail  = "No updates available - everything is already up to date."
+    }
+    else {
+        try {
+            Write-Verbose "Running winget upgrade --all ..."
+            Write-Host ""
+            Write-Host "WinGet found updates for:" -ForegroundColor Cyan
+            foreach ($pendingName in $wingetPendingNames) {
+                Write-Host "  - $pendingName" -ForegroundColor Cyan
+            }
+            Write-Host "Applying now - this can take a few minutes. Please wait..." -ForegroundColor Cyan
+            $wingetArgs = @(
+                "upgrade",
+                "--all",
+                "--silent",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--disable-interactivity"
+            )
+            $wingetProc = Start-Process -FilePath "winget.exe" -ArgumentList $wingetArgs -Wait -PassThru -WindowStyle Hidden
+            $wingetUpgradeRan      = $true
+            $wingetUpgradeExitCode = $wingetProc.ExitCode
+            Write-Host "WinGet finished (exit code $wingetUpgradeExitCode)." -ForegroundColor Cyan
+            Write-Host ""
+
+            if ($wingetUpgradeExitCode -eq 0) {
+                $wingetUpgradeSuccess = $true
+                $wingetUpgradeDetail  = "Updated:"
+            }
+            else {
+                # WinGet's non-zero exit codes aren't documented as cleanly as
+                # Dell Command | Update's - report the raw code rather than
+                # guessing at a specific cause. The names attempted are still
+                # listed below via PendingNames.
+                $wingetUpgradeDetail = "Attempted (winget exited with code $wingetUpgradeExitCode - one or more may not have applied):"
+            }
+        }
+        catch {
+            $wingetUpgradeDetail = "Failed to launch winget.exe: $($_.Exception.Message)"
+        }
+    }
+}
+
+$wingetUpgradeResult = [PSCustomObject]@{
+    CheckType     = 'WinGet Upgrade'
+    RequestedApp  = 'WinGet - Apply Updates'
+    Ran           = $wingetUpgradeRan
+    Success       = $wingetUpgradeSuccess
+    ExitCode      = $wingetUpgradeExitCode
+    PendingNames  = $wingetPendingNames
+    Detail        = $wingetUpgradeDetail
+}
+
+$results += @($wingetUpgradeResult)
+
+Write-Host "WinGet - Apply Updates" -ForegroundColor Cyan
+Write-Host "=======================" -ForegroundColor Cyan
+if (-not $allChecksPassed -or -not $wingetUpgradeResult.Ran) {
+    Write-Host "[SKIPPED]   " -ForegroundColor Yellow -NoNewline
+    Write-Host "$($wingetUpgradeResult.Detail)" -ForegroundColor White -BackgroundColor Black
+}
+elseif ($wingetUpgradeResult.Success) {
+    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
+    Write-Host "$($wingetUpgradeResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    foreach ($updatedName in $wingetUpgradeResult.PendingNames) {
+        Write-Host "            - $updatedName" -ForegroundColor White -BackgroundColor Black
+    }
+}
+else {
+    Write-Host "[ISSUE]     " -ForegroundColor Red -NoNewline
+    Write-Host "$($wingetUpgradeResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    foreach ($updatedName in $wingetUpgradeResult.PendingNames) {
+        Write-Host "            - $updatedName" -ForegroundColor White -BackgroundColor Black
+    }
+}
+Write-Host ""
+}
+
+# ===========================================================================
+# PART 12 - Dell Command | Update: apply updates (gated on a clean run)
 # ===========================================================================
 # Only runs in Option 2 (full verification) - and even then, only if every
 # app and every additional system check came back OK, i.e.
@@ -878,7 +1217,6 @@ $extraIssues     = $extraChecks | Where-Object { -not $_.Skipped -and -not $_.Wa
 # "dcu-cli.exe /applyUpdates -silent -reboot=disable" so updates are
 # installed but the system is never rebooted automatically.
 if ($Mode -eq 2) {
-$allChecksPassed   = ($missingCount -eq 0 -and $extraIssues.Count -eq 0)
 $dcuRan            = $false
 $dcuSuccess        = $false
 $dcuRebootRequired = $false
@@ -907,7 +1245,7 @@ else {
         try {
             Write-Verbose "Running dcu-cli.exe /applyUpdates -reboot=disable ..."
             Write-Host ""
-            Write-Host "Dell Command | Update is now scanning and applying updates - this can take several minutes depending on what's pending (BIOS/firmware updates in particular are slow). Please wait..." -ForegroundColor Cyan
+            Write-Host "Dell Command | Update is now scanning and applying updates - this can take several minutes. Please wait..." -ForegroundColor Cyan
             $dcuArgs = @(
                 "/applyUpdates",
                 "-silent",
@@ -917,7 +1255,8 @@ else {
             $dcuProc = Start-Process -FilePath $dcuCliPath -ArgumentList $dcuArgs -Wait -PassThru -WindowStyle Hidden
             $dcuRan      = $true
             $dcuExitCode = $dcuProc.ExitCode
-            Write-Host "Dell Command | Update finished (exit code $dcuExitCode)." -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "Dell Command | Update finished."
             Write-Host ""
 
             switch ($dcuExitCode) {
@@ -1058,7 +1397,7 @@ if (-not $isAdmin) {
 }
 
 # ===========================================================================
-# PART 11 - Export all results to a PDF report (via headless Microsoft Edge)
+# PART 13 - Export all results to a PDF report (via headless Microsoft Edge)
 # ===========================================================================
 # Builds an HTML version of everything shown in the console above, then
 # renders it to PDF using Microsoft Edge's built-in headless "print to PDF"
@@ -1129,98 +1468,52 @@ function Export-BuildReportPdf {
     [void]$sb.AppendLine("<div class='meta'>Generated: $(ConvertTo-SafeHtml $generatedAt)</div>")
 
     [void]$sb.AppendLine("<h2>Application Installation Status</h2>")
-    foreach ($group in $grouped) {
-        $entries = $group.Group
-        if ($entries[0].Installed) {
-            $entry = $entries | Sort-Object { ($_.Version | Out-String).Trim().Length } -Descending | Select-Object -First 1
-            $displayRequestedName = if ($FriendlyNames.ContainsKey($entry.RequestedApp)) { $FriendlyNames[$entry.RequestedApp] } else { $entry.RequestedApp }
-            $versionText = if ($entry.Version) { $entry.Version } else { "(version unknown)" }
-            $nameText = if ($entry.DisplayName -eq $entry.RequestedApp -or $entry.DisplayName.StartsWith($entry.RequestedApp, [System.StringComparison]::OrdinalIgnoreCase)) { $displayRequestedName } else { "$displayRequestedName -> $($entry.DisplayName)" }
-            [void]$sb.AppendLine("<div class='line'><span class='ok'>[INSTALLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $nameText)  |  Version: $(ConvertTo-SafeHtml $versionText)</span></div>")
+    # Reuses the same $appLines array the console already built and sorted
+    # alphabetically, so the PDF always matches the console exactly.
+    foreach ($appLine in $appLines) {
+        if ($appLine.Installed) {
+            [void]$sb.AppendLine("<div class='line'><span class='ok'>[INSTALLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $appLine.NameText)  |  Version: $(ConvertTo-SafeHtml $appLine.VersionText)</span></div>")
         }
         else {
-            $displayMissingName = if ($FriendlyNames.ContainsKey($group.Name)) { $FriendlyNames[$group.Name] } else { $group.Name }
-            [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $displayMissingName)  |  Not found on this system</span></div>")
+            [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $appLine.NameText)  |  Not found on this system</span></div>")
         }
-    }
-
-    # Chocolatey doesn't register an uninstall entry like the apps above, but
-    # it's a genuine installed application - report it alongside them here.
-    if ($chocoResult.Installed) {
-        [void]$sb.AppendLine("<div class='line'><span class='ok'>[INSTALLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $chocoResult.RequestedApp)  |  Version: $(ConvertTo-SafeHtml $chocoResult.Version)</span></div>")
-    }
-    else {
-        [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $chocoResult.RequestedApp)  |  Not found on this system</span></div>")
     }
 
     [void]$sb.AppendLine("<h2>Additional System Checks</h2>")
-
-    # .NET 3.5
-    if ($netFxResult.Skipped) {
-        [void]$sb.AppendLine("<div class='line'><span class='skipped'>[SKIPPED]</span> <span class='appname'>$(ConvertTo-SafeHtml $netFxResult.RequestedApp)  |  $(ConvertTo-SafeHtml $netFxResult.DisplayName)  |  $(ConvertTo-SafeHtml $netFxResult.Detail)</span></div>")
-    }
-    elseif ($netFxResult.Installed -and $netFxResult.WasAlreadyEnabled) {
-        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $netFxResult.RequestedApp)  |  $(ConvertTo-SafeHtml $netFxResult.DisplayName)  |  $(ConvertTo-SafeHtml $netFxResult.Detail)</span></div>")
-    }
-    elseif ($netFxResult.Installed) {
-        [void]$sb.AppendLine("<div class='line'><span class='ok'>[ENABLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $netFxResult.RequestedApp)  |  $(ConvertTo-SafeHtml $netFxResult.DisplayName)  |  $(ConvertTo-SafeHtml $netFxResult.Detail)</span></div>")
-    }
-    else {
-        [void]$sb.AppendLine("<div class='line'><span class='issue'>[DISABLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $netFxResult.RequestedApp)  |  $(ConvertTo-SafeHtml $netFxResult.DisplayName)  |  $(ConvertTo-SafeHtml $netFxResult.Detail)</span></div>")
+    # Reuses the same $additionalChecksDisplay array the console already
+    # built and sorted alphabetically, so the PDF always matches the console.
+    foreach ($entry in $additionalChecksDisplay) {
+        [void]$sb.AppendLine("<div class='line'><span class='$($entry.StatusClass)'>$(ConvertTo-SafeHtml $entry.Tag)</span> <span class='appname'>$(ConvertTo-SafeHtml $entry.Body)</span></div>")
     }
 
-    # Registry key
-    if ($regResult.Installed) {
-        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $regResult.RequestedApp)  |  $(ConvertTo-SafeHtml $regResult.Detail)</span></div>")
+    # Local Admin Account
+    [void]$sb.AppendLine("<h2>Local Admin Account</h2>")
+    if (-not $localAdminResult.Ran) {
+        [void]$sb.AppendLine("<div class='line'><span class='skipped'>[SKIPPED]</span> <span class='appname'>$(ConvertTo-SafeHtml $localAdminResult.Detail)</span></div>")
+    }
+    elseif ($localAdminResult.Success) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $localAdminResult.Detail)</span></div>")
     }
     else {
-        [void]$sb.AppendLine("<div class='line'><span class='issue'>[ISSUE]</span> <span class='appname'>$(ConvertTo-SafeHtml $regResult.RequestedApp)  |  $(ConvertTo-SafeHtml $regResult.Detail)</span></div>")
+        [void]$sb.AppendLine("<div class='line'><span class='issue'>[ISSUE]</span> <span class='appname'>$(ConvertTo-SafeHtml $localAdminResult.Detail)</span></div>")
     }
 
-    # Hostname naming convention
-    if ($hostnameResult.Installed) {
-        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $hostnameResult.RequestedApp)  |  $(ConvertTo-SafeHtml $hostnameResult.DisplayName)  |  $(ConvertTo-SafeHtml $hostnameResult.Detail)</span></div>")
+    # WinGet - Apply Updates
+    [void]$sb.AppendLine("<h2>WinGet - Apply Updates</h2>")
+    if (-not $allChecksPassed -or -not $wingetUpgradeResult.Ran) {
+        [void]$sb.AppendLine("<div class='line'><span class='skipped'>[SKIPPED]</span> <span class='appname'>$(ConvertTo-SafeHtml $wingetUpgradeResult.Detail)</span></div>")
+    }
+    elseif ($wingetUpgradeResult.Success) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $wingetUpgradeResult.Detail)</span></div>")
+        foreach ($updatedName in $wingetUpgradeResult.PendingNames) {
+            [void]$sb.AppendLine("<div class='line'><span class='appname'>&nbsp;&nbsp;&nbsp;&nbsp;- $(ConvertTo-SafeHtml $updatedName)</span></div>")
+        }
     }
     else {
-        [void]$sb.AppendLine("<div class='line'><span class='skipped'>[WARNING]</span> <span class='appname'>$(ConvertTo-SafeHtml $hostnameResult.RequestedApp)  |  $(ConvertTo-SafeHtml $hostnameResult.DisplayName)  |  $(ConvertTo-SafeHtml $hostnameResult.Detail)</span></div>")
-    }
-
-    # WiFi profile
-    if ($wifiResult.Installed) {
-        [void]$sb.AppendLine("<div class='line'><span class='ok'>[FOUND]</span> <span class='appname'>$(ConvertTo-SafeHtml $wifiResult.RequestedApp)  |  $(ConvertTo-SafeHtml $wifiResult.Detail)</span></div>")
-    }
-    else {
-        [void]$sb.AppendLine("<div class='line'><span class='skipped'>[WARNING]</span> <span class='appname'>$(ConvertTo-SafeHtml $wifiResult.RequestedApp)  |  $(ConvertTo-SafeHtml $wifiResult.Detail)</span></div>")
-    }
-
-    # Microsoft Store
-    if ($msStoreResult.Installed -and $msStoreResult.WasAlreadyEnabled) {
-        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $msStoreResult.RequestedApp)  |  Version: $(ConvertTo-SafeHtml $msStoreResult.Version)</span></div>")
-    }
-    elseif ($msStoreResult.Installed) {
-        [void]$sb.AppendLine("<div class='line'><span class='ok'>[ENABLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $msStoreResult.RequestedApp)  |  Version: $(ConvertTo-SafeHtml $msStoreResult.Version)  |  $(ConvertTo-SafeHtml $msStoreResult.Detail)</span></div>")
-    }
-    else {
-        [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $msStoreResult.RequestedApp)  |  $(ConvertTo-SafeHtml $msStoreResult.Detail)</span></div>")
-    }
-
-    # Snipping Tool
-    if ($snipResult.Installed -and $snipResult.WasAlreadyEnabled) {
-        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $snipResult.RequestedApp)  |  $(ConvertTo-SafeHtml $snipResult.DisplayName)  |  Version: $(ConvertTo-SafeHtml $snipResult.Version)</span></div>")
-    }
-    elseif ($snipResult.Installed) {
-        [void]$sb.AppendLine("<div class='line'><span class='ok'>[ENABLED]</span> <span class='appname'>$(ConvertTo-SafeHtml $snipResult.RequestedApp)  |  $(ConvertTo-SafeHtml $snipResult.DisplayName)  |  Version: $(ConvertTo-SafeHtml $snipResult.Version)  |  $(ConvertTo-SafeHtml $snipResult.Detail)</span></div>")
-    }
-    else {
-        [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $snipResult.RequestedApp)  |  $(ConvertTo-SafeHtml $snipResult.Detail)</span></div>")
-    }
-
-    # .NET 10
-    if ($dotnet10Result.Installed) {
-        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $dotnet10Result.RequestedApp)  |  Version: $(ConvertTo-SafeHtml $dotnet10Result.Version)</span></div>")
-    }
-    else {
-        [void]$sb.AppendLine("<div class='line'><span class='issue'>[MISSING]</span> <span class='appname'>$(ConvertTo-SafeHtml $dotnet10Result.RequestedApp)  |  $(ConvertTo-SafeHtml $dotnet10Result.Detail)</span></div>")
+        [void]$sb.AppendLine("<div class='line'><span class='issue'>[ISSUE]</span> <span class='appname'>$(ConvertTo-SafeHtml $wingetUpgradeResult.Detail)</span></div>")
+        foreach ($updatedName in $wingetUpgradeResult.PendingNames) {
+            [void]$sb.AppendLine("<div class='line'><span class='appname'>&nbsp;&nbsp;&nbsp;&nbsp;- $(ConvertTo-SafeHtml $updatedName)</span></div>")
+        }
     }
 
     # Dell Command | Update - Apply Updates
@@ -1289,6 +1582,26 @@ if ($Mode -eq 2) {
     }
 }
 else {
+    # Quick check (Option 1): list what WinGet has available, but never
+    # apply anything here - that only happens in Option 2.
+    if ($wingetResult.Installed) {
+        Write-Host "Checking WinGet for available app updates (listing only - not applying)..." -ForegroundColor Cyan
+        $wingetPendingNamesQuick = Get-WingetPendingUpgradeNames
+
+        if ($wingetPendingNamesQuick -and $wingetPendingNamesQuick.Count -gt 0) {
+            Write-Host "[AVAILABLE] " -ForegroundColor Yellow -NoNewline
+            Write-Host "WinGet updates available:" -ForegroundColor White -BackgroundColor Black
+            foreach ($pendingNameQuick in $wingetPendingNamesQuick) {
+                Write-Host "            - $pendingNameQuick" -ForegroundColor White -BackgroundColor Black
+            }
+        }
+        else {
+            Write-Host "[OK]        " -ForegroundColor Green -NoNewline
+            Write-Host "No WinGet updates available - everything is already up to date." -ForegroundColor White -BackgroundColor Black
+        }
+        Write-Host ""
+    }
+
     Write-Host "Quick software check complete - no PDF generated (run Option 2 for the full verification and PDF report)." -ForegroundColor Cyan
 }
 
