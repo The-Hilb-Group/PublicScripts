@@ -425,7 +425,7 @@ $netFxOk = ($netFxState -eq 'Enabled')
 
 $netFxResult = [PSCustomObject]@{
     CheckType           = '.NET 3.5'
-    RequestedApp        = '.NET Framework 3.5 (NetFx3)'
+    RequestedApp        = '.NET 3.5'
     Installed           = $netFxOk
     Skipped             = $netFxQueryFailed
     WasAlreadyEnabled    = $netFxWasAlreadyEnabled
