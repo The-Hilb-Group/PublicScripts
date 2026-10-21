@@ -106,8 +106,8 @@ param(
 
     [string]$CsvPath,
 
-    # 1 = Quick software check
-    # 2 = Full verification 
+    # 1 = Quick Check
+    # 2 = Full Check 
     # Leave unset to be prompted interactively when the script runs.
     [ValidateSet(1, 2)]
     [int]$Mode
@@ -165,9 +165,12 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
 if (-not $Mode) {
     Write-Host ""
     Write-Host "Select an option:" -ForegroundColor Cyan
+    Write-Host "=================" -ForegroundColor Cyan
     Write-Host "  1) Quick software check" -ForegroundColor White
+    Write-Host "     -Checks apps and system configs only" -ForegroundColor White
     Write-Host ""
     Write-Host "  2) Full verification" -ForegroundColor White
+    Write-Host "     -Runs all checks to ensure device is properly configured and ready to ship" -ForegroundColor White
     Write-Host ""
 
     do {
@@ -179,11 +182,11 @@ if (-not $Mode) {
 
 if ($Mode -eq 1) {
     Write-Host ""
-    Write-Host "Running Option 1: Quick software check" -ForegroundColor Cyan
+    Write-Host "Running Quick software check" -ForegroundColor Cyan
 }
 else {
     Write-Host ""
-    Write-Host "Running Option 2: Full verification" -ForegroundColor Cyan
+    Write-Host "Running Full verification" -ForegroundColor Cyan
 }
 
 # ---------------------------------------------------------------------------
