@@ -166,11 +166,8 @@ if (-not $Mode) {
     Write-Host ""
     Write-Host "Select an option:" -ForegroundColor Cyan
     Write-Host "  1) Quick software check" -ForegroundColor White
-    Write-Host "     (Apps, WinGet, .NET 3.5, .NET 10, Registry, MS Store, Snipping Tool)" -ForegroundColor White
-    Write-Host "     Lists available WinGet updates but does not apply them." -ForegroundColor White
-    Write-Host "     Console output only - no PDF, no hostname/WiFi checks, no Dell Command | Update." -ForegroundColor White
+    Write-Host ""
     Write-Host "  2) Full verification" -ForegroundColor White
-    Write-Host "     Everything - all checks, Dell Command | Update apply, and PDF export." -ForegroundColor White
     Write-Host ""
 
     do {
