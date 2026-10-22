@@ -46,23 +46,28 @@
     if it exists but isn't already a member) - requires an elevated
     session. The password is entered interactively as a SecureString and
     is never stored, logged, or hardcoded anywhere in this script. Runs
-    BEFORE WinGet (Part 11) and Dell Command | Update (Part 12) below, and
-    is NOT gated on the other checks passing.
+    BEFORE Part 11 below, and is NOT gated on the other checks passing.
 
-    Part 11: In Option 2 only, if and only if every app and every
+    Part 11: In Option 2 only, enumerates every WiFi profile on the machine
+    and removes any that are NOT "HILB-WiFi" or "HILB-WiFi6" (via
+    "netsh wlan delete profile"), then rechecks to confirm each removal
+    actually took effect. Not gated on the other checks passing - treated
+    as a standard cleanup step.
+
+    Part 12: In Option 2 only, if and only if every app and every
     additional check above came back OK (nothing missing/disabled/issue -
     a [SKIPPED] check does not block this) and WinGet itself is present,
     runs "winget upgrade --all --silent" to apply any available app
-    updates. Runs BEFORE Dell Command | Update (Part 12) below. In Option
+    updates. Runs BEFORE Dell Command | Update (Part 13) below. In Option
     1 (quick check), available WinGet updates are listed in the console
     instead, but never applied.
 
-    Part 12: Under the same conditions as Part 11, runs
+    Part 13: Under the same conditions as Part 12, runs
     "dcu-cli.exe /applyUpdates -silent -reboot=disable" to install any
     pending Dell updates without rebooting the system, then reports
     whether it ran, succeeded, and what (if anything) was applied.
 
-    Part 13: Exports all results (apps + all extra checks) to a PDF report at
+    Part 14: Exports all results (apps + all extra checks) to a PDF report at
     C:\hilb\HOSTNAME_build_report.pdf (HOSTNAME replaced with the device's
     actual hostname), rendered via Microsoft Edge's built-in headless
     print-to-PDF feature - no extra modules or Office required.
@@ -89,7 +94,7 @@
     - Enabling .NET Framework 3.5 (if it's not already enabled) DOES require
       an elevated/Administrator PowerShell session. If not elevated, the
       script will report the current state but skip the enable attempt.
-    - Part 13 writes a PDF report to C:\hilb\HOSTNAME_build_report.pdf on
+    - Part 14 writes a PDF report to C:\hilb\HOSTNAME_build_report.pdf on
       every run (HOSTNAME is the device's actual computer name), rendered
       via headless Microsoft Edge (--headless --print-to-pdf). Requires
       Edge to be present at its default install path or on PATH - it ships
@@ -1057,7 +1062,121 @@ Write-Host ""
 }
 
 # ===========================================================================
-# PART 11 - WinGet: apply available updates (gated on a clean run)
+# PART 11 - WiFi profile cleanup: remove every profile except the allowed list
+# ===========================================================================
+# Runs in Option 2 only. Not gated on the other checks passing - treated as
+# a standard cleanup step, like the local admin account provisioning above.
+# Keeps only "HILB-WiFi" and "HILB-WiFi6" - everything else gets removed.
+function Get-AllWifiProfileNames {
+    # Parses "netsh wlan show profiles" to pull out every profile name,
+    # regardless of whether it's an all-user or per-user profile. Returns
+    # an empty array (never throws) if the output doesn't look as expected.
+    try {
+        $raw = netsh wlan show profiles 2>$null
+    }
+    catch {
+        return @()
+    }
+    if (-not $raw) { return @() }
+
+    $names = @()
+    foreach ($line in $raw) {
+        if ($line -match '^\s*(All User Profile|Current User Profile)\s*:\s*(.+)$') {
+            $names += $Matches[2].Trim()
+        }
+    }
+    return $names
+}
+
+if ($Mode -eq 2) {
+$allowedWifiProfiles = @("HILB-WiFi", "HILB-WiFi6")
+$guestWifiRan        = $false
+$guestWifiSuccess    = $false
+$guestWifiRemoved    = @()
+$guestWifiFailed     = @()
+$guestWifiDetail     = $null
+
+try {
+    $allWifiProfileNames = Get-AllWifiProfileNames
+    $profilesToRemove    = $allWifiProfileNames | Where-Object { $_ -notin $allowedWifiProfiles }
+
+    if (-not $profilesToRemove -or $profilesToRemove.Count -eq 0) {
+        $guestWifiRan     = $true
+        $guestWifiSuccess = $true
+        $guestWifiDetail  = "No extra WiFi profiles found - only the allowed profiles (or none) are present."
+    }
+    else {
+        foreach ($profileName in $profilesToRemove) {
+            Write-Verbose "Removing WiFi profile '$profileName'..."
+            netsh wlan delete profile name="$profileName" 2>&1 | Out-Null
+        }
+
+        # Recheck to confirm which removals actually took effect, rather
+        # than trusting netsh's own exit text.
+        $remainingProfileNames = Get-AllWifiProfileNames
+        foreach ($profileName in $profilesToRemove) {
+            if ($profileName -in $remainingProfileNames) {
+                $guestWifiFailed += $profileName
+            }
+            else {
+                $guestWifiRemoved += $profileName
+            }
+        }
+
+        $guestWifiRan = $true
+        if ($guestWifiFailed.Count -eq 0) {
+            $guestWifiSuccess = $true
+            $guestWifiDetail  = "Removed:"
+        }
+        else {
+            $guestWifiDetail = "Some profiles could not be removed:"
+        }
+    }
+}
+catch {
+    $guestWifiDetail = "Unable to check/remove WiFi profiles: $($_.Exception.Message)"
+}
+
+$guestWifiResult = [PSCustomObject]@{
+    CheckType     = 'WiFi Profile Cleanup'
+    RequestedApp  = "WiFi profile cleanup (keep only: $($allowedWifiProfiles -join ', '))"
+    Ran           = $guestWifiRan
+    Success       = $guestWifiSuccess
+    RemovedNames  = $guestWifiRemoved
+    FailedNames   = $guestWifiFailed
+    Detail        = $guestWifiDetail
+}
+
+$results += @($guestWifiResult)
+
+Write-Host "WiFi Profile Cleanup" -ForegroundColor Cyan
+Write-Host "=====================" -ForegroundColor Cyan
+if (-not $guestWifiResult.Ran) {
+    Write-Host "[SKIPPED]   " -ForegroundColor Yellow -NoNewline
+    Write-Host "$($guestWifiResult.Detail)" -ForegroundColor White -BackgroundColor Black
+}
+elseif ($guestWifiResult.Success) {
+    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
+    Write-Host "$($guestWifiResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    foreach ($removedName in $guestWifiResult.RemovedNames) {
+        Write-Host "            - $removedName" -ForegroundColor White -BackgroundColor Black
+    }
+}
+else {
+    Write-Host "[ISSUE]     " -ForegroundColor Red -NoNewline
+    Write-Host "$($guestWifiResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    foreach ($failedName in $guestWifiResult.FailedNames) {
+        Write-Host "            - $failedName (still present)" -ForegroundColor White -BackgroundColor Black
+    }
+    foreach ($removedName in $guestWifiResult.RemovedNames) {
+        Write-Host "            - $removedName (removed)" -ForegroundColor White -BackgroundColor Black
+    }
+}
+Write-Host ""
+}
+
+# ===========================================================================
+# PART 12 - WinGet: apply available updates (gated on a clean run)
 # ===========================================================================
 # Only runs in Option 2 (full verification), only if every app and every
 # additional system check came back OK (same gate as Dell Command | Update
@@ -1202,7 +1321,7 @@ Write-Host ""
 }
 
 # ===========================================================================
-# PART 12 - Dell Command | Update: apply updates (gated on a clean run)
+# PART 13 - Dell Command | Update: apply updates (gated on a clean run)
 # ===========================================================================
 # Only runs in Option 2 (full verification) - and even then, only if every
 # app and every additional system check came back OK, i.e.
@@ -1393,7 +1512,7 @@ if (-not $isAdmin) {
 }
 
 # ===========================================================================
-# PART 13 - Export all results to a PDF report (via headless Microsoft Edge)
+# PART 14 - Export all results to a PDF report (via headless Microsoft Edge)
 # ===========================================================================
 # Builds an HTML version of everything shown in the console above, then
 # renders it to PDF using Microsoft Edge's built-in headless "print to PDF"
@@ -1492,6 +1611,27 @@ function Export-BuildReportPdf {
     }
     else {
         [void]$sb.AppendLine("<div class='line'><span class='issue'>[ISSUE]</span> <span class='appname'>$(ConvertTo-SafeHtml $localAdminResult.Detail)</span></div>")
+    }
+
+    # WiFi Profile Cleanup
+    [void]$sb.AppendLine("<h2>WiFi Profile Cleanup</h2>")
+    if (-not $guestWifiResult.Ran) {
+        [void]$sb.AppendLine("<div class='line'><span class='skipped'>[SKIPPED]</span> <span class='appname'>$(ConvertTo-SafeHtml $guestWifiResult.Detail)</span></div>")
+    }
+    elseif ($guestWifiResult.Success) {
+        [void]$sb.AppendLine("<div class='line'><span class='ok'>[OK]</span> <span class='appname'>$(ConvertTo-SafeHtml $guestWifiResult.Detail)</span></div>")
+        foreach ($removedName in $guestWifiResult.RemovedNames) {
+            [void]$sb.AppendLine("<div class='line'><span class='appname'>&nbsp;&nbsp;&nbsp;&nbsp;- $(ConvertTo-SafeHtml $removedName)</span></div>")
+        }
+    }
+    else {
+        [void]$sb.AppendLine("<div class='line'><span class='issue'>[ISSUE]</span> <span class='appname'>$(ConvertTo-SafeHtml $guestWifiResult.Detail)</span></div>")
+        foreach ($failedName in $guestWifiResult.FailedNames) {
+            [void]$sb.AppendLine("<div class='line'><span class='appname'>&nbsp;&nbsp;&nbsp;&nbsp;- $(ConvertTo-SafeHtml $failedName) (still present)</span></div>")
+        }
+        foreach ($removedName in $guestWifiResult.RemovedNames) {
+            [void]$sb.AppendLine("<div class='line'><span class='appname'>&nbsp;&nbsp;&nbsp;&nbsp;- $(ConvertTo-SafeHtml $removedName) (removed)</span></div>")
+        }
     }
 
     # WinGet - Apply Updates
