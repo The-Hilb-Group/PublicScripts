@@ -41,36 +41,45 @@
     Part 9: Checks whether a .NET 10 runtime is installed, via
     "dotnet --list-runtimes". Check only - no remediation is attempted.
 
-    Part 10: In Option 2 only, creates a local administrator account named
-    "thgadmin" if it doesn't already exist (and adds it to Administrators
-    if it exists but isn't already a member) - requires an elevated
-    session. The password is entered interactively as a SecureString and
-    is never stored, logged, or hardcoded anywhere in this script. Runs
-    BEFORE Part 11 below, and is NOT gated on the other checks passing.
+    Part 10: In Option 3 (Full verification) only, creates a local
+    administrator account named "thgadmin" if it doesn't already exist
+    (and adds it to Administrators if it exists but isn't already a
+    member) - requires an elevated session. The password is entered
+    interactively as a SecureString and is never stored, logged, or
+    hardcoded anywhere in this script. Runs BEFORE Part 11 below, and is
+    NOT gated on the other checks passing.
 
-    Part 11: In Option 2 only, enumerates every WiFi profile on the machine
+    Part 11: In Option 3 only, enumerates every WiFi profile on the machine
     and removes any that are NOT "HILB-WiFi" or "HILB-WiFi6" (via
     "netsh wlan delete profile"), then rechecks to confirm each removal
     actually took effect. Not gated on the other checks passing - treated
     as a standard cleanup step.
 
-    Part 12: In Option 2 only, if and only if every app and every
-    additional check above came back OK (nothing missing/disabled/issue -
-    a [SKIPPED] check does not block this) and WinGet itself is present,
+    Part 12: Runs in Option 2 (Apply WinGet and Driver updates only) and
+    Option 3 (Full verification) only - does NOT run in Option 1 (quick
+    check), which only checks presence and never queries for or applies
+    updates. In Option 3, only runs if every app and every additional
+    check above came back OK (nothing missing/disabled/issue - a
+    [SKIPPED] check does not block this). In Option 2, no other checks
+    ran, so it always proceeds. Either way, if WinGet itself is present,
     runs "winget upgrade --all --silent" to apply any available app
-    updates. Runs BEFORE Dell Command | Update (Part 13) below. In Option
-    1 (quick check), available WinGet updates are listed in the console
-    instead, but never applied.
+    updates, BEFORE Dell Command | Update (Part 13) below.
 
-    Part 13: Under the same conditions as Part 12, runs
-    "dcu-cli.exe /applyUpdates -silent -reboot=disable" to install any
+    Part 13: Runs under the same conditions as Part 12 (Options 2 and 3).
+    Runs "dcu-cli.exe /applyUpdates -silent -reboot=disable" to install any
     pending Dell updates without rebooting the system, then reports
-    whether it ran, succeeded, and what (if anything) was applied.
+    whether it ran, succeeded, and what (if anything) was applied. In
+    Option 3 only, this is also followed by an offer to rename the PC (if
+    its hostname matched the "SD-" filter in Part 5) and a reboot decision
+    based on whether updates were applied and/or the PC was renamed.
+    Option 2 stops after reporting the apply results - no rename, no
+    reboot.
 
-    Part 14: Exports all results (apps + all extra checks) to a PDF report at
-    C:\hilb\HOSTNAME_build_report.pdf (HOSTNAME replaced with the device's
-    actual hostname), rendered via Microsoft Edge's built-in headless
-    print-to-PDF feature - no extra modules or Office required.
+    Part 14: In Option 3 only, exports all results (apps + all extra
+    checks) to a PDF report at C:\hilb\HOSTNAME_build_report.pdf (HOSTNAME
+    replaced with the device's actual hostname), rendered via Microsoft
+    Edge's built-in headless print-to-PDF feature - no extra modules or
+    Office required.
 
     All results are printed to the console, color-coded green (good/present)
     or red (missing/misconfigured).
@@ -112,9 +121,10 @@ param(
     [string]$CsvPath,
 
     # 1 = Quick Check
-    # 2 = Full Check 
+    # 2 = Apply WinGet and Driver updates only
+    # 3 = Full Check
     # Leave unset to be prompted interactively when the script runs.
-    [ValidateSet(1, 2)]
+    [ValidateSet(1, 2, 3)]
     [int]$Mode
 )
 
@@ -164,30 +174,188 @@ $FriendlyNames = @{
 # ---------------------------------------------------------------------------
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 
-# ---------------------------------------------------------------------------
-# Mode selection - quick check vs full verification
-# ---------------------------------------------------------------------------
-if (-not $Mode) {
-    Write-Host ""
-    Write-Host "Select an option:" -ForegroundColor Cyan
-    Write-Host "=================" -ForegroundColor Cyan
-    Write-Host "  1) Quick software check" -ForegroundColor White
-    Write-Host "     -Checks apps and system configs only" -ForegroundColor White
-    Write-Host ""
-    Write-Host "  2) Full verification" -ForegroundColor White
-    Write-Host "     -Runs all checks to ensure device is properly configured and ready to ship" -ForegroundColor White
+# ===========================================================================
+# Standalone action: rename the computer. Shared by the full verification
+# flow (Option 3, where it's only offered if the hostname matched "SD-")
+# and the standalone "R" menu option (where it's always offered, since the
+# tech chose it explicitly).
+# ===========================================================================
+function Invoke-RenamePrompt {
+    $currentHostname = $env:COMPUTERNAME
+    Write-Host "Current hostname: $currentHostname" -ForegroundColor Cyan
+    $renameChoice = Read-Host "Would you like to rename this PC now? (y/n)"
+
+    $renamed = $false
+    $newName = $null
+
+    if ($renameChoice -match '^(y|yes)$') {
+        if (-not $isAdmin) {
+            Write-Host "Cannot rename the computer - this session is not elevated. Re-run as Administrator to rename." -ForegroundColor Yellow
+        }
+        else {
+            $newHostname = Read-Host "Enter the new hostname"
+            if ([string]::IsNullOrWhiteSpace($newHostname)) {
+                Write-Host "No hostname entered - skipping rename." -ForegroundColor Yellow
+            }
+            else {
+                try {
+                    Rename-Computer -NewName $newHostname -Force -ErrorAction Stop
+                    Write-Host "Renamed to '$newHostname'. A restart is required for the change to take effect." -ForegroundColor Green
+                    $renamed = $true
+                    $newName = $newHostname
+                }
+                catch {
+                    Write-Host "Rename FAILED: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+        }
+    }
+    else {
+        Write-Host "Skipping rename." -ForegroundColor Yellow
+    }
     Write-Host ""
 
-    do {
-        $modeSelection = Read-Host "Enter 1 or 2"
-    } while ($modeSelection -notin @('1', '2'))
-
-    $Mode = [int]$modeSelection
+    return [PSCustomObject]@{
+        Renamed      = $renamed
+        NewName      = $newName
+        OriginalName = $currentHostname
+    }
 }
+
+# ===========================================================================
+# Standalone action: create (or fix up group membership for) the local
+# "thgadmin" administrator account. Shared by the full verification flow
+# (Option 3, where it's a standard provisioning step) and the standalone
+# "A" menu option. The password is entered interactively as a SecureString
+# and is never stored, logged, or hardcoded anywhere in this script.
+# ===========================================================================
+function Invoke-LocalAdminProvisioning {
+    $localAdminUsername      = "thgadmin"
+    $localAdminRan           = $false
+    $localAdminSuccess       = $false
+    $localAdminAlreadyExisted = $false
+    $localAdminDetail        = $null
+
+    if (-not $isAdmin) {
+        $localAdminDetail = "Skipped - this session is not elevated. Re-run as Administrator to create the local admin account."
+    }
+    else {
+        $existingLocalAdmin = Get-LocalUser -Name $localAdminUsername -ErrorAction SilentlyContinue
+
+        if ($existingLocalAdmin) {
+            $localAdminRan            = $true
+            $localAdminAlreadyExisted = $true
+            try {
+                $isAlreadyAdminMember = (Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop) |
+                    Where-Object { $_.Name -like "*\$localAdminUsername" -or $_.Name -eq $localAdminUsername }
+
+                if (-not $isAlreadyAdminMember) {
+                    Add-LocalGroupMember -Group "Administrators" -Member $localAdminUsername -ErrorAction Stop
+                    $localAdminDetail = "Account '$localAdminUsername' already existed - was not in Administrators, so it was added. Password left unchanged."
+                }
+                else {
+                    $localAdminDetail = "Account '$localAdminUsername' already exists and is already an Administrator - left unchanged."
+                }
+                $localAdminSuccess = $true
+            }
+            catch {
+                $localAdminDetail = "Account '$localAdminUsername' already exists, but checking/updating its Administrators membership FAILED: $($_.Exception.Message)"
+            }
+        }
+        else {
+            Write-Host ""
+            Write-Host "Creating local admin account '$localAdminUsername'." -ForegroundColor Cyan
+            Write-Host "Enter a password for this account now - it is used only in this session and is never stored, logged, or written to disk." -ForegroundColor Cyan
+
+            $localAdminPassword = $null
+            $passwordsMatch = $false
+
+            while (-not $passwordsMatch) {
+                $pw1 = Read-Host -AsSecureString -Prompt "New password for $localAdminUsername"
+                $pw2 = Read-Host -AsSecureString -Prompt "Confirm password"
+
+                $pw1Ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pw1)
+                $pw2Ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pw2)
+                $pw1Plain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($pw1Ptr)
+                $pw2Plain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($pw2Ptr)
+
+                if (-not [string]::IsNullOrEmpty($pw1Plain) -and $pw1Plain -ceq $pw2Plain) {
+                    $passwordsMatch = $true
+                    $localAdminPassword = $pw1
+                }
+                else {
+                    Write-Host "Passwords did not match (or were empty) - try again." -ForegroundColor Yellow
+                }
+
+                # Clear plaintext copies from memory as soon as they've been compared
+                [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pw1Ptr)
+                [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pw2Ptr)
+                $pw1Plain = $null
+                $pw2Plain = $null
+            }
+
+            try {
+                New-LocalUser -Name $localAdminUsername -Password $localAdminPassword -FullName "THG Admin" -Description "Local admin account created by build script" -AccountNeverExpires -ErrorAction Stop | Out-Null
+                Add-LocalGroupMember -Group "Administrators" -Member $localAdminUsername -ErrorAction Stop
+
+                $localAdminRan     = $true
+                $localAdminSuccess = $true
+                $localAdminDetail  = "Account '$localAdminUsername' created and added to Administrators."
+            }
+            catch {
+                $localAdminDetail = "FAILED to create/configure '$localAdminUsername': $($_.Exception.Message)"
+            }
+            finally {
+                # Drop the reference to the SecureString now that we're done with it
+                $localAdminPassword = $null
+            }
+            Write-Host ""
+        }
+    }
+
+    $localAdminResult = [PSCustomObject]@{
+        CheckType      = 'Local Admin Account'
+        RequestedApp   = "Local admin account ($localAdminUsername)"
+        Ran            = $localAdminRan
+        Success        = $localAdminSuccess
+        AlreadyExisted = $localAdminAlreadyExisted
+        Detail         = $localAdminDetail
+    }
+
+    Write-Host "Local Admin Account" -ForegroundColor Cyan
+    Write-Host "====================" -ForegroundColor Cyan
+    if (-not $localAdminResult.Ran) {
+        Write-Host "[SKIPPED]   " -ForegroundColor Yellow -NoNewline
+        Write-Host "$($localAdminResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    }
+    elseif ($localAdminResult.Success) {
+        Write-Host "[OK]        " -ForegroundColor Green -NoNewline
+        Write-Host "$($localAdminResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    }
+    else {
+        Write-Host "[ISSUE]     " -ForegroundColor Red -NoNewline
+        Write-Host "$($localAdminResult.Detail)" -ForegroundColor White -BackgroundColor Black
+    }
+    Write-Host ""
+
+    return $localAdminResult
+}
+
+# ===========================================================================
+# Invoke-SelectedMode - everything Options 1/2/3 actually do. Wrapped in a
+# function so the main menu loop below can call it repeatedly without
+# re-running the whole script.
+# ===========================================================================
+function Invoke-SelectedMode {
+    param([int]$Mode)
 
 if ($Mode -eq 1) {
     Write-Host ""
     Write-Host "Running Quick software check" -ForegroundColor Cyan
+}
+elseif ($Mode -eq 2) {
+    Write-Host ""
+    Write-Host "Running Apply WinGet and Driver updates" -ForegroundColor Cyan
 }
 else {
     Write-Host ""
@@ -215,6 +383,9 @@ else {
 # ===========================================================================
 # PART 1 - Installed applications (registry uninstall keys)
 # ===========================================================================
+# Skipped entirely in Mode 2 (Apply WinGet and Driver updates only) - that
+# mode runs nothing except the WinGet and Dell Command | Update steps.
+if ($Mode -ne 2) {
 $uninstallKeys = @(
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
@@ -316,6 +487,7 @@ if ($initiallyMissingNames) {
         }
     }
 }
+}
 
 # ===========================================================================
 # PART 2 - WinGet presence and version (reinstall/re-register and recheck
@@ -391,6 +563,10 @@ $wingetResult = [PSCustomObject]@{
 # ===========================================================================
 # PART 3 - .NET Framework 3.5 (NetFx3) - check, and enable if needed
 # ===========================================================================
+# Parts 3 through 9 (below) are all skipped entirely in Mode 2 (Apply WinGet
+# and Driver updates only) - that mode runs nothing except the WinGet and
+# Dell Command | Update steps.
+if ($Mode -ne 2) {
 $netFxAction      = $null
 $netFxState       = $null
 $netFxQueryFailed = $false
@@ -696,17 +872,28 @@ $dotnet10Result = [PSCustomObject]@{
     Version      = $dotnet10Version
     Detail       = $dotnet10Detail
 }
+}
 
 # ===========================================================================
 # Combine all results
 # ===========================================================================
-$results = @($appResults) + @($wingetResult) + @($netFxResult) + @($regResult) + `
-           @($hostnameResult) + @($wifiResult) + @($msStoreResult) + @($snipResult) + `
-           @($dotnet10Result)
+# In Mode 2, none of the above checks ran - $results starts with just the
+# WinGet presence check (still needed to know whether to attempt the
+# upgrade below) and gets the WinGet/DCU apply results appended later.
+if ($Mode -ne 2) {
+    $results = @($appResults) + @($wingetResult) + @($netFxResult) + @($regResult) + `
+               @($hostnameResult) + @($wifiResult) + @($msStoreResult) + @($snipResult) + `
+               @($dotnet10Result)
+}
+else {
+    $results = @($wingetResult)
+}
 
 # ===========================================================================
-# Output - color-coded per-item console report
+# Output - color-coded per-item console report (Mode 1 and 3 only - Mode 2
+# runs nothing except the WinGet and Dell Command | Update steps below)
 # ===========================================================================
+if ($Mode -ne 2) {
 Write-Host ""
 Write-Host "Application Installation Status" -ForegroundColor Cyan
 Write-Host "================================" -ForegroundColor Cyan
@@ -844,10 +1031,10 @@ else {
     $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $regResult.RequestedApp; Tag = "[ISSUE]"; StatusClass = 'issue'; Body = "$($regResult.RequestedApp)  |  $($regResult.Detail)" }
 }
 
-# Hostname naming convention and WiFi profile - full verification (Option 2)
+# Hostname naming convention and WiFi profile - full verification (Option 3)
 # only. Both are still computed above regardless of mode (they're cheap,
-# no remediation/waiting involved) but are only reported in Option 2.
-if ($Mode -eq 2) {
+# no remediation/waiting involved) but are only reported in Option 3.
+if ($Mode -eq 3) {
     if ($hostnameResult.Installed) {
         $additionalChecksDisplay += [PSCustomObject]@{ SortKey = $hostnameResult.RequestedApp; Tag = "[OK]"; StatusClass = 'ok'; Body = "$($hostnameResult.RequestedApp)  |  $($hostnameResult.DisplayName)  |  $($hostnameResult.Detail)" }
     }
@@ -929,144 +1116,40 @@ Write-Host ""
 $installedCount = ($appLines | Where-Object { $_.Installed }).Count
 $missingCount    = ($appLines | Where-Object { -not $_.Installed }).Count
 $extraChecks     = @($wingetResult, $netFxResult, $regResult, $msStoreResult, $snipResult, $dotnet10Result)
-if ($Mode -eq 2) {
+if ($Mode -eq 3) {
     $extraChecks += @($hostnameResult, $wifiResult)
 }
 $extraSkipped    = $extraChecks | Where-Object { $_.Skipped -eq $true }
 $extraWarnings   = $extraChecks | Where-Object { -not $_.Skipped -and $_.Warning -eq $true }
 $extraOk         = $extraChecks | Where-Object { -not $_.Skipped -and -not $_.Warning -and $_.Installed }
 $extraIssues     = $extraChecks | Where-Object { -not $_.Skipped -and -not $_.Warning -and -not $_.Installed }
+}
 
 # ===========================================================================
 # PART 10 - Local admin account: create "thgadmin" if it doesn't exist
 # ===========================================================================
-# Runs in Option 2, BEFORE WinGet (Part 11) and Dell Command | Update
-# (Part 12) below. Unlike those two steps, this is NOT gated on the other
-# checks passing - it's treated as a standard provisioning step rather than
-# a conditional remediation. Requires an elevated session.
+# Runs in Option 3 (Full verification) only, BEFORE WinGet (Part 12) and
+# Dell Command | Update (Part 13) below. Unlike those two steps, this is
+# NOT gated on the other checks passing - it's treated as a standard
+# provisioning step rather than a conditional remediation. Requires an
+# elevated session.
 #
 # The password is entered interactively as a SecureString - it is never
 # stored, logged, written to disk, or hardcoded anywhere in this script.
 # If the account already exists, its password is left untouched; the script
 # only makes sure it's a member of Administrators.
-if ($Mode -eq 2) {
-$localAdminUsername      = "thgadmin"
-$localAdminRan           = $false
-$localAdminSuccess       = $false
-$localAdminAlreadyExisted = $false
-$localAdminDetail        = $null
-
-if (-not $isAdmin) {
-    $localAdminDetail = "Skipped - this session is not elevated. Re-run as Administrator to create the local admin account."
-}
-else {
-    $existingLocalAdmin = Get-LocalUser -Name $localAdminUsername -ErrorAction SilentlyContinue
-
-    if ($existingLocalAdmin) {
-        $localAdminRan            = $true
-        $localAdminAlreadyExisted = $true
-        try {
-            $isAlreadyAdminMember = (Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop) |
-                Where-Object { $_.Name -like "*\$localAdminUsername" -or $_.Name -eq $localAdminUsername }
-
-            if (-not $isAlreadyAdminMember) {
-                Add-LocalGroupMember -Group "Administrators" -Member $localAdminUsername -ErrorAction Stop
-                $localAdminDetail = "Account '$localAdminUsername' already existed - was not in Administrators, so it was added. Password left unchanged."
-            }
-            else {
-                $localAdminDetail = "Account '$localAdminUsername' already exists and is already an Administrator - left unchanged."
-            }
-            $localAdminSuccess = $true
-        }
-        catch {
-            $localAdminDetail = "Account '$localAdminUsername' already exists, but checking/updating its Administrators membership FAILED: $($_.Exception.Message)"
-        }
-    }
-    else {
-        Write-Host ""
-        Write-Host "Creating local admin account '$localAdminUsername'." -ForegroundColor Cyan
-        Write-Host "Enter a password for this account now - it is used only in this session and is never stored, logged, or written to disk." -ForegroundColor Cyan
-
-        $localAdminPassword = $null
-        $passwordsMatch = $false
-
-        while (-not $passwordsMatch) {
-            $pw1 = Read-Host -AsSecureString -Prompt "New password for $localAdminUsername"
-            $pw2 = Read-Host -AsSecureString -Prompt "Confirm password"
-
-            $pw1Ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pw1)
-            $pw2Ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pw2)
-            $pw1Plain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($pw1Ptr)
-            $pw2Plain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($pw2Ptr)
-
-            if (-not [string]::IsNullOrEmpty($pw1Plain) -and $pw1Plain -ceq $pw2Plain) {
-                $passwordsMatch = $true
-                $localAdminPassword = $pw1
-            }
-            else {
-                Write-Host "Passwords did not match (or were empty) - try again." -ForegroundColor Yellow
-            }
-
-            # Clear plaintext copies from memory as soon as they've been compared
-            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pw1Ptr)
-            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pw2Ptr)
-            $pw1Plain = $null
-            $pw2Plain = $null
-        }
-
-        try {
-            New-LocalUser -Name $localAdminUsername -Password $localAdminPassword -FullName "THG Admin" -Description "Local admin account created by build script" -AccountNeverExpires -ErrorAction Stop | Out-Null
-            Add-LocalGroupMember -Group "Administrators" -Member $localAdminUsername -ErrorAction Stop
-
-            $localAdminRan     = $true
-            $localAdminSuccess = $true
-            $localAdminDetail  = "Account '$localAdminUsername' created and added to Administrators."
-        }
-        catch {
-            $localAdminDetail = "FAILED to create/configure '$localAdminUsername': $($_.Exception.Message)"
-        }
-        finally {
-            # Drop the reference to the SecureString now that we're done with it
-            $localAdminPassword = $null
-        }
-        Write-Host ""
-    }
-}
-
-$localAdminResult = [PSCustomObject]@{
-    CheckType      = 'Local Admin Account'
-    RequestedApp   = "Local admin account ($localAdminUsername)"
-    Ran            = $localAdminRan
-    Success        = $localAdminSuccess
-    AlreadyExisted = $localAdminAlreadyExisted
-    Detail         = $localAdminDetail
-}
-
-$results += @($localAdminResult)
-
-Write-Host "Local Admin Account" -ForegroundColor Cyan
-Write-Host "====================" -ForegroundColor Cyan
-if (-not $localAdminResult.Ran) {
-    Write-Host "[SKIPPED]   " -ForegroundColor Yellow -NoNewline
-    Write-Host "$($localAdminResult.Detail)" -ForegroundColor White -BackgroundColor Black
-}
-elseif ($localAdminResult.Success) {
-    Write-Host "[OK]        " -ForegroundColor Green -NoNewline
-    Write-Host "$($localAdminResult.Detail)" -ForegroundColor White -BackgroundColor Black
-}
-else {
-    Write-Host "[ISSUE]     " -ForegroundColor Red -NoNewline
-    Write-Host "$($localAdminResult.Detail)" -ForegroundColor White -BackgroundColor Black
-}
-Write-Host ""
+if ($Mode -eq 3) {
+    $localAdminResult = Invoke-LocalAdminProvisioning
+    $results += @($localAdminResult)
 }
 
 # ===========================================================================
 # PART 11 - WiFi profile cleanup: remove every profile except the allowed list
 # ===========================================================================
-# Runs in Option 2 only. Not gated on the other checks passing - treated as
-# a standard cleanup step, like the local admin account provisioning above.
-# Keeps only "HILB-WiFi" and "HILB-WiFi6" - everything else gets removed.
+# Runs in Option 3 (Full verification) only. Not gated on the other checks
+# passing - treated as a standard cleanup step, like the local admin
+# account provisioning above. Keeps only "HILB-WiFi" and "HILB-WiFi6" -
+# everything else gets removed.
 function Get-AllWifiProfileNames {
     # Parses "netsh wlan show profiles" to pull out every profile name,
     # regardless of whether it's an all-user or per-user profile. Returns
@@ -1088,7 +1171,7 @@ function Get-AllWifiProfileNames {
     return $names
 }
 
-if ($Mode -eq 2) {
+if ($Mode -eq 3) {
 $allowedWifiProfiles = @("HILB-WiFi", "HILB-WiFi6")
 $guestWifiRan        = $false
 $guestWifiSuccess    = $false
@@ -1176,11 +1259,13 @@ Write-Host ""
 }
 
 # ===========================================================================
-# PART 12 - WinGet: apply available updates (gated on a clean run)
+# PART 12 - WinGet: apply available updates
 # ===========================================================================
-# Only runs in Option 2 (full verification), only if every app and every
+# Runs in Option 2 (Apply WinGet and Driver updates only) and Option 3
+# (Full verification). In Option 3, only runs if every app and every
 # additional system check came back OK (same gate as Dell Command | Update
-# below), and only if WinGet itself is actually present and working. First
+# below). In Option 2, no other checks ran, so it always proceeds. Either
+# way, only runs if WinGet itself is actually present and working. First
 # lists what currently has an update available (so we can name names in the
 # report), then runs "winget upgrade --all" unattended, before Dell Command
 # | Update, so app updates land before the Dell driver/firmware pass.
@@ -1220,8 +1305,11 @@ function Get-WingetPendingUpgradeNames {
     return $names
 }
 
-if ($Mode -eq 2) {
-$allChecksPassed = ($missingCount -eq 0 -and $extraIssues.Count -eq 0)
+if ($Mode -eq 2 -or $Mode -eq 3) {
+# Mode 2 (Apply WinGet and Driver updates only) runs no other checks, so
+# there's nothing to gate on - always proceed. Mode 3 (Full verification)
+# keeps the existing gate: only proceed if every app/system check passed.
+$allChecksPassed = if ($Mode -eq 2) { $true } else { ($missingCount -eq 0 -and $extraIssues.Count -eq 0) }
 
 $wingetUpgradeRan      = $false
 $wingetUpgradeSuccess  = $false
@@ -1321,16 +1409,16 @@ Write-Host ""
 }
 
 # ===========================================================================
-# PART 13 - Dell Command | Update: apply updates (gated on a clean run)
+# PART 13 - Dell Command | Update: apply updates
 # ===========================================================================
-# Only runs in Option 2 (full verification) - and even then, only if every
-# app and every additional system check came back OK, i.e.
-# $missingCount -eq 0 and $extraIssues.Count -eq 0. A [SKIPPED] check
-# (couldn't verify, e.g. .NET 3.5 without elevation) does NOT block this -
-# only a confirmed [MISSING]/[ISSUE]/[DISABLED] does. Runs
+# Runs in Option 2 (Apply WinGet and Driver updates only) and Option 3
+# (Full verification), reusing the same $allChecksPassed computed in Part
+# 12 above (always true in Option 2; in Option 3, only true if every app
+# and every additional system check came back OK - a [SKIPPED] check does
+# NOT block this, only a confirmed [MISSING]/[ISSUE]/[DISABLED] does). Runs
 # "dcu-cli.exe /applyUpdates -silent -reboot=disable" so updates are
 # installed but the system is never rebooted automatically.
-if ($Mode -eq 2) {
+if ($Mode -eq 2 -or $Mode -eq 3) {
 $dcuRan            = $false
 $dcuSuccess        = $false
 $dcuRebootRequired = $false
@@ -1419,6 +1507,14 @@ else {
 Write-Host ""
 
 # ---------------------------------------------------------------------------
+# Everything below (hostname rename offer + reboot decision) is Mode 3
+# (Full verification) only - Mode 2 has no hostname check data (Part 5 was
+# skipped) and should not rename the PC or reboot it; it only applies
+# WinGet/Dell updates and stops.
+# ---------------------------------------------------------------------------
+if ($Mode -eq 3) {
+
+# ---------------------------------------------------------------------------
 # If the hostname matched the "SD-" filter earlier, offer to rename the PC
 # now that Dell Command | Update has finished. Renaming requires a reboot to
 # take effect, and (like any computer rename) requires an elevated session.
@@ -1428,34 +1524,9 @@ $newHostnameValue = $null
 
 if ($hostnameResult.Warning) {
     Write-Host "Reminder: this PC's hostname ($hostnameValue) contains 'SD-' and should be renamed." -ForegroundColor Yellow
-    $renameChoice = Read-Host "Would you like to rename it now? (y/n)"
-
-    if ($renameChoice -match '^(y|yes)$') {
-        if (-not $isAdmin) {
-            Write-Host "Cannot rename the computer - this session is not elevated. Re-run as Administrator to rename." -ForegroundColor Yellow
-        }
-        else {
-            $newHostname = Read-Host "Enter the new hostname"
-            if ([string]::IsNullOrWhiteSpace($newHostname)) {
-                Write-Host "No hostname entered - skipping rename." -ForegroundColor Yellow
-            }
-            else {
-                try {
-                    Rename-Computer -NewName $newHostname -Force -ErrorAction Stop
-                    Write-Host "Renamed to '$newHostname'. A restart is required for the change to take effect." -ForegroundColor Green
-                    $renameSucceeded  = $true
-                    $newHostnameValue = $newHostname
-                }
-                catch {
-                    Write-Host "Rename FAILED: $($_.Exception.Message)" -ForegroundColor Red
-                }
-            }
-        }
-    }
-    else {
-        Write-Host "Skipping rename - remember to rename this PC before deployment." -ForegroundColor Yellow
-    }
-    Write-Host ""
+    $renameOutcome = Invoke-RenamePrompt
+    $renameSucceeded  = $renameOutcome.Renamed
+    $newHostnameValue = $renameOutcome.NewName
 }
 
 # ---------------------------------------------------------------------------
@@ -1483,10 +1554,13 @@ Write-Host ""
 $dcuAppliedUpdates = ($dcuApplyResult.Success -and $dcuExitCode -ne 500)
 $shouldReboot      = ($renameSucceeded -or $dcuAppliedUpdates)
 }
+}
 
 # ===========================================================================
-# Summary (printed last, at the bottom of the console output)
+# Summary (printed last, at the bottom of the console output) - Mode 1 and
+# 3 only, since Mode 2 never computed these counts (no checks ran).
 # ===========================================================================
+if ($Mode -ne 2) {
 Write-Host "Summary: " -NoNewline
 Write-Host "$installedCount apps installed" -ForegroundColor Green -NoNewline
 Write-Host " / " -NoNewline
@@ -1509,6 +1583,7 @@ Write-Host ""
 if (-not $isAdmin) {
     Write-Host "Note: This session was not run as Administrator. Cannot check for .NET 3.5 without elevation." -ForegroundColor Yellow
     Write-Host ""
+}
 }
 
 # ===========================================================================
@@ -1705,7 +1780,7 @@ function Export-BuildReportPdf {
     }
 }
 
-if ($Mode -eq 2) {
+if ($Mode -eq 3) {
     Export-BuildReportPdf -Results $results
 
     if ($shouldReboot) {
@@ -1717,28 +1792,18 @@ if ($Mode -eq 2) {
         Write-Host "No updates were applied and the hostname was not changed - no reboot needed." -ForegroundColor Cyan
     }
 }
+elseif ($Mode -eq 2) {
+    # Apply WinGet and Driver updates (Option 2): the WinGet upgrade (Part
+    # 12) and Dell Command | Update apply (Part 13) already ran above and
+    # printed their own results - nothing else to do. No PDF, no hostname
+    # rename, no reboot in this mode.
+    Write-Host "Apply WinGet and Driver updates complete - no PDF generated (run Option 3 for the full verification and PDF report)." -ForegroundColor Cyan
+}
 else {
-    # Quick check (Option 1): list what WinGet has available, but never
-    # apply anything here - that only happens in Option 2.
-    if ($wingetResult.Installed) {
-        Write-Host "Checking WinGet for available app updates (listing only - not applying)..." -ForegroundColor Cyan
-        $wingetPendingNamesQuick = Get-WingetPendingUpgradeNames
-
-        if ($wingetPendingNamesQuick -and $wingetPendingNamesQuick.Count -gt 0) {
-            Write-Host "[AVAILABLE] " -ForegroundColor Yellow -NoNewline
-            Write-Host "WinGet updates available:" -ForegroundColor White -BackgroundColor Black
-            foreach ($pendingNameQuick in $wingetPendingNamesQuick) {
-                Write-Host "            - $pendingNameQuick" -ForegroundColor White -BackgroundColor Black
-            }
-        }
-        else {
-            Write-Host "[OK]        " -ForegroundColor Green -NoNewline
-            Write-Host "No WinGet updates available - everything is already up to date." -ForegroundColor White -BackgroundColor Black
-        }
-        Write-Host ""
-    }
-
-    Write-Host "Quick software check complete - no PDF generated (run Option 2 for the full verification and PDF report)." -ForegroundColor Cyan
+    # Quick check (Option 1): only checks that required apps and the
+    # specified additional system items are present - no WinGet update
+    # query, no updates applied. That only happens in Options 2 and 3.
+    Write-Host "Quick software check complete - no PDF generated (run Option 3 for the full verification and PDF report)." -ForegroundColor Cyan
 }
 
 # ---------------------------------------------------------------------------
@@ -1764,3 +1829,82 @@ else {
 # }
 #
 # Export-BuildReport -Results $results
+}
+
+# ===========================================================================
+# Main menu loop
+# ===========================================================================
+# Options 1, 2, R, and A all loop back to this menu when done (without
+# clearing the screen - prior output stays visible, the menu just prints
+# again below it). Only Option 3 (Full verification) and Option Q (quit)
+# end the script.
+#
+# If -Mode was supplied on the command line, that mode runs once without
+# showing the menu first; after it finishes (and loops back, if it's 1 or
+# 2), the menu takes over normally for any further selections.
+# ---------------------------------------------------------------------------
+$pendingSelection = if ($Mode) { $Mode.ToString() } else { $null }
+
+while ($true) {
+    if (-not $pendingSelection) {
+        Write-Host ""
+        Write-Host "Select an option:" -ForegroundColor Cyan
+        Write-Host "=================" -ForegroundColor Cyan
+        Write-Host "  1) Quick software check" -ForegroundColor White
+        Write-Host "     -Checks apps and system configs only" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  2) Apply WinGet and Driver updates" -ForegroundColor White
+        Write-Host "     -Only runs WinGet updates and Dell Command | Update - nothing else" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  3) Full verification" -ForegroundColor White
+        Write-Host "     -Runs all checks to ensure device is properly configured and ready to ship" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  R) Rename this PC" -ForegroundColor White
+        Write-Host "     -Just the computer rename step from Option 3, on its own" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  A) Create the local admin account" -ForegroundColor White
+        Write-Host "     -Just the 'thgadmin' account provisioning step from Option 3, on its own" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  Q) Quit" -ForegroundColor White
+        Write-Host ""
+
+        do {
+            $menuInput = Read-Host "Enter 1, 2, 3, R, A, or Q"
+            $menuInput = $menuInput.Trim().ToUpper()
+        } while ($menuInput -notin @('1', '2', '3', 'R', 'A', 'Q'))
+
+        $pendingSelection = $menuInput
+    }
+
+    switch ($pendingSelection) {
+        '1' {
+            Invoke-SelectedMode -Mode 1
+            $pendingSelection = $null
+        }
+        '2' {
+            Invoke-SelectedMode -Mode 2
+            $pendingSelection = $null
+        }
+        '3' {
+            Invoke-SelectedMode -Mode 3
+            return
+        }
+        'R' {
+            Write-Host ""
+            Write-Host "Rename This PC" -ForegroundColor Cyan
+            Write-Host "==============" -ForegroundColor Cyan
+            $null = Invoke-RenamePrompt
+            $pendingSelection = $null
+        }
+        'A' {
+            Write-Host ""
+            $null = Invoke-LocalAdminProvisioning
+            $pendingSelection = $null
+        }
+        'Q' {
+            Write-Host ""
+            Write-Host "Exiting." -ForegroundColor Cyan
+            return
+        }
+    }
+}
