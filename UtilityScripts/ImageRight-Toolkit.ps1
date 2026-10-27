@@ -19,6 +19,8 @@
     For automation, pass -Option 1, 2, 3, 4, 5.1, or 5.2 to skip the menu. If no -Option is given and the
     session is not interactive (no one to answer a prompt), option 2 is used; options 3 and 5 are never
     chosen by default.
+    In an interactive session the menu comes back after each option finishes and keeps coming back until Q
+    is chosen. With -Option (or when not interactive) the script runs that one option and exits.
 
     Flow (option 2; option 1 runs only steps 1 and 8, numbered 1-2 on the console):
       1. Pre-checks (admin, C:\Temp, running apps)
@@ -40,7 +42,8 @@
     Exit codes:  0 = success / already current,  3010 = success, reboot required,  1 = failure
                  Patch failures are logged as warnings and do NOT change the exit code; the base install
                  result decides it (3010 is still returned if a patch requires a reboot).
-                 Quitting from the menu without choosing an option exits 0 with no changes made.
+                 Quitting from the menu exits 0 if no option was run; otherwise it exits with the exit code
+                 of the last option that ran.
                  Option 3: exits 1 if any product failed to uninstall or any folder could not be fully deleted.
                  Options 4 and 5: 0 = every config passes the check, 1 = any config issue or update error.
                  (in -TestBits mode: 0 = BITS test passed,  1 = BITS test failed)
@@ -51,7 +54,8 @@
     Sagitta Launcher and delete their folders, 4 = IR Configuration Check (read-only report),
     5.1 = IR Configuration Update with the THGx configs, 5.2 = IR Configuration Update with the RIV configs.
     Plain 5 asks which configuration interactively and is rejected in a non-interactive session.
-    If omitted, a menu is shown in an interactive session; in a non-interactive session option 2 is used.
+    If omitted, a menu is shown in an interactive session and returns after each option until Q is
+    chosen; in a non-interactive session option 2 is used.
 
 .PARAMETER SkipPatches
     Skips Step 8 (ImageRight patching). Only the base install/version check runs. Option 2 only; it cannot
@@ -85,7 +89,7 @@
     .\Install-ImageRight25R1.ps1 -Option 5.1
 
 .NOTES
-    Version      : 1.5.4
+    Version      : 1.6.0
     Baseline date: 2026-10-12
     Target       : ImageRight 25R1 (Vertafore)
 
@@ -102,7 +106,10 @@
     Run modes:
       - Interactive runs show a menu: 1 = Apply IR25R1 updates, 2 = Install IR25R1 and update,
         3 = Uninstall IR and Cleanup, 4 = IR Configuration Check, 5 = IR Configuration Update
-        (then 1 = THGx or 2 = RIV), Q = quit.
+        (then 1 = THGx or 2 = RIV), Q = quit. The menu returns after each option finishes and repeats until
+        Q is chosen. State (reboot flag, failure counts, BITS fallback flag) is reset for every run, and the
+        transcript in $TranscriptPath is appended to after the first run so earlier output is kept.
+      - With -Option, or when not interactive, the script runs that one option and exits (no menu loop).
       - -Option 1, 2, 3, 4, 5.1, or 5.2 skip the menu for automation (Intune, SCCM, RMM). With no -Option and no
         interactive console, option 2 is used, which matches how earlier versions behaved. Passing -Option
         explicitly in your deployment tool is recommended.
@@ -206,6 +213,10 @@
                          release notes page is fetched. If none are installed, patching ends immediately with
                          nothing downloaded. Patches for apps that aren't installed are no longer looked up,
                          downloaded, or checked.
+      1.6.0  2026-10-23  The interactive menu now loops: after each option finishes it returns to the menu until Q
+                         is selected. -Option and non-interactive runs still run once and exit. Run logic moved
+                         into Invoke-RunMode with per-run state reset; the transcript is appended after the first
+                         run. Quitting exits with the last run's exit code (0 if nothing was run).
 #>
 
 [CmdletBinding()]
@@ -221,7 +232,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ----------------------------------------------------------------------------
 # Settings
 # ----------------------------------------------------------------------------
-$ScriptVersion    = '1.5.4'                       # Keep in sync with Version in .NOTES above
+$ScriptVersion    = '1.6.0'                       # Keep in sync with Version in .NOTES above
 $AppDisplayName   = 'ImageRight Desktop'          # Must match DisplayName in Add/Remove Programs exactly
 $RequiredVersion  = [version]'25.1.1.204'         # Installed version >= this is treated as up to date
 $TempRoot         = 'C:\Temp'
@@ -2014,6 +2025,269 @@ function Invoke-BitsTest {
 }
 
 # ----------------------------------------------------------------------------
+# Run one selected option (the interactive menu can run several in one session)
+# ----------------------------------------------------------------------------
+function Invoke-RunMode {
+    # Runs one option ('1'-'4', '5.1', '5.2') start to finish and sets $script:RunExitCode.
+    # The result is passed back through $script:RunExitCode (not the pipeline).
+    param([Parameter(Mandatory = $true)][string]$Selected)
+
+    $script:RunExitCode = 1
+    $script:RunCount++
+
+    # Fresh state for every run, so one option never affects the next
+    $script:RebootRequired        = $false
+    $script:PatchFailureCount     = 0
+    $script:UninstallFailureCount = 0
+    $script:BitsDisabled          = $false
+    $script:RunStamp              = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $script:TotalSteps            = 9
+    $script:PatchStep             = 8
+    $script:CleanupStep           = 9
+
+    $RunMode       = 0
+    $ConfigProfile = $null
+    switch ($Selected) {
+        '5.1'   { $RunMode = 5; $ConfigProfile = 'THGx' }
+        '5.2'   { $RunMode = 5; $ConfigProfile = 'RIV' }
+        default { $RunMode = [int]$Selected }
+    }
+
+    if ($RunMode -ne 2 -and $SkipPatches) {
+        Write-Host "-SkipPatches applies only to option 2 (Install IR25R1 and update)." -ForegroundColor Red
+        return
+    }
+
+    $UpdateOnly    = ($RunMode -eq 1)
+    $UninstallOnly = ($RunMode -eq 3)
+    $CheckOnly     = ($RunMode -eq 4)
+    $ConfigUpdate  = ($RunMode -eq 5)
+    $ModeLabel = switch ($RunMode) {
+        1 { 'Option 1 - Apply IR25R1 updates' }
+        2 { 'Option 2 - Install IR25R1 and update' }
+        3 { 'Option 3 - Force uninstall ImageRight and Sagitta Launcher' }
+        4 { 'Option 4 - IR Configuration Check' }
+        5 { "Option $Selected - IR Configuration Update ($ConfigProfile)" }
+    }
+    if ($UpdateOnly) {
+        $script:TotalSteps  = 2
+        $script:PatchStep   = 2
+        $script:CleanupStep = 2
+    }
+    elseif ($UninstallOnly) {
+        $script:TotalSteps  = 4
+        $script:CleanupStep = 4
+    }
+    elseif ($CheckOnly) {
+        $script:TotalSteps  = 2
+        $script:CleanupStep = 2
+    }
+    elseif ($ConfigUpdate) {
+        $script:TotalSteps  = 4
+        $script:CleanupStep = 4
+    }
+
+    $ExitCode = 1
+    $transcriptStarted = $false
+
+    try {
+        Write-Step 1 'Pre-checks'
+        Initialize-Environment
+
+        try {
+            $transcriptArgs = @{ Path = $TranscriptPath; Force = $true }
+            if ($script:RunCount -gt 1) { $transcriptArgs['Append'] = $true }
+            Start-Transcript @transcriptArgs | Out-Null
+            $transcriptStarted = $true
+        }
+        catch {
+            Write-Warn "Could not start transcript: $($_.Exception.Message)"
+        }
+
+        Write-Info "Script version $ScriptVersion. Mode: $ModeLabel"
+        if ($CheckOnly -or $ConfigUpdate) {
+            Write-Info "Running ImageRight applications are left open in this mode."
+        }
+        else {
+            Stop-RunningApps
+        }
+        Write-Ok "Pre-checks complete."
+
+        if ($CheckOnly) {
+            Write-Step 2 'Checking ImageRight configuration files'
+            $configFailures = Test-ImageRightConfigs
+
+            if ($configFailures -eq 0) {
+                $ExitCode = 0
+            }
+            else {
+                Write-Warn "The configuration check found $configFailures issue(s). Exit code 1."
+                $ExitCode = 1
+            }
+        }
+        elseif ($ConfigUpdate) {
+            $runningIR = Get-Process -Name 'imageright*', 'IRInstallerService' -ErrorAction SilentlyContinue
+            if ($runningIR) {
+                Write-Warn "ImageRight processes are running ($((($runningIR | Select-Object -ExpandProperty ProcessName -Unique) -join ', '))). New configs take effect after these apps/services are restarted."
+            }
+
+            Write-Step 2 'Downloading and extracting the config package'
+            Get-ConfigPackage
+
+            # Locate the profile folder anywhere in the extracted package (handles a wrapping top-level folder)
+            $packageFolderName = $ConfigPackageFolders[$ConfigProfile]
+            $configSource = Get-ChildItem -LiteralPath $ConfigExtractPath -Directory -Recurse |
+                Where-Object { $_.Name -eq $packageFolderName } |
+                Select-Object -First 1
+            if (-not $configSource) {
+                throw "Folder '$packageFolderName' was not found in the config package."
+            }
+
+            Write-Step 3 "Replacing configuration files with $ConfigProfile versions"
+            $updateErrors = Update-ImageRightConfigs -SourceFolder $configSource.FullName -Label $ConfigProfile
+
+            Write-Step 4 'Verifying configuration files'
+            $configFailures = Test-ImageRightConfigs
+
+            if ($updateErrors -gt 0 -or $configFailures -gt 0) {
+                Write-Warn "Configuration update finished with $updateErrors update error(s) and $configFailures check issue(s). Exit code 1."
+                $ExitCode = 1
+            }
+            else {
+                Write-Ok "ImageRight configuration updated to $ConfigProfile."
+                $ExitCode = 0
+            }
+        }
+        elseif ($UninstallOnly) {
+            Write-Step 2 'Uninstalling ImageRight and the Sagitta Launcher'
+            Invoke-ForceUninstall
+
+            Write-Step 3 'Removing ImageRight folders'
+            Remove-ImageRightFolders
+
+            if ($script:UninstallFailureCount -gt 0) {
+                throw "Force uninstall finished with $($script:UninstallFailureCount) problem(s). Review the output above and the logs in $MsiLogFolder."
+            }
+
+            if ($script:RebootRequired) {
+                Write-Warn "ImageRight and the Sagitta Launcher were removed, but a reboot is required to finish (exit code 3010)."
+                $ExitCode = 3010
+            }
+            else {
+                Write-Ok "ImageRight and the Sagitta Launcher were removed."
+                $ExitCode = 0
+            }
+        }
+        else {
+            if ($UpdateOnly) {
+                Write-Info "Applying updates only. The base install steps are skipped."
+
+                $desktopApp = Get-ItemProperty -Path $UninstallRegistryPaths -ErrorAction SilentlyContinue |
+                    Where-Object { $_.DisplayName -eq $AppDisplayName } |
+                    Select-Object -First 1
+                if (-not $desktopApp) {
+                    Write-Warn "'$AppDisplayName' is not installed on this machine, so most patches will be skipped. Use option 2 to install it."
+                }
+                $skipBaseInstall = $true
+            }
+            else {
+                Write-Step 2 'Checking installed version'
+                $skipBaseInstall = Test-ImageRightUpToDate
+            }
+
+            if (-not $skipBaseInstall) {
+                Write-Step 3 'Downloading installer package'
+                Get-InstallerPackage
+
+                Write-Step 4 'Extracting and verifying installer package'
+                Expand-InstallerPackage
+                Assert-PayloadComplete
+
+                Write-Step 5 'Removing previous ImageRight version'
+                Uninstall-ImageRight
+
+                Write-Step 6 'Installing ImageRight components'
+                Install-ImageRight
+
+                Write-Step 7 'Applying configuration, service restart, and permissions'
+                Copy-ImageRightConfigs
+                Restart-ImageRightService
+                Set-IRFolderPermissions
+                if ($InstallBrowserExtensions) {
+                    Write-Info "Configuring browser extension policies..."
+                    Install-BrowserExtensions
+                }
+            }
+            elseif (-not $UpdateOnly) {
+                Write-Info "Steps 3-7 (base install) skipped - ImageRight is already current."
+            }
+
+            # Patching always runs, even when the base install is current. Failures here are warnings only.
+            Write-Step $script:PatchStep 'Applying latest ImageRight patches'
+            if ($SkipPatches) {
+                Write-Info "Patching skipped (-SkipPatches)."
+            }
+            else {
+                try {
+                    Invoke-ImageRightPatching
+                }
+                catch {
+                    Write-Warn "Patching stopped unexpectedly: $($_.Exception.Message)"
+                    if ($script:PatchFailureCount -lt 1) { $script:PatchFailureCount = 1 }
+                }
+
+                if ($script:PatchFailureCount -gt 0) {
+                    Write-Warn "$($script:PatchFailureCount) patch item(s) failed or could not be applied. This does not affect the exit code. Review the output above and the logs in $MsiLogFolder."
+                }
+            }
+
+            if ($script:RebootRequired) {
+                Write-Warn "ImageRight install/patching complete. A reboot is required (exit code 3010)."
+                $ExitCode = 3010
+            }
+            else {
+                if ($UpdateOnly) { Write-Ok "ImageRight patching complete." }
+                else             { Write-Ok "ImageRight install/patching complete." }
+                $ExitCode = 0
+            }
+        }
+    }
+    catch {
+        Write-Host ""
+        Write-Host "Installer execution failed: $($_.Exception.Message)" -ForegroundColor Red
+        $ExitCode = 1
+    }
+    finally {
+        # Options 1, 4, and 5 print no cleanup or closing summary lines. Option 5 still removes its downloaded
+        # package here, quietly (only a failure to remove it is reported).
+        if ($ConfigUpdate) {
+            Remove-ConfigPackage
+        }
+
+        if (-not ($UpdateOnly -or $CheckOnly -or $ConfigUpdate)) {
+            Write-Step $script:CleanupStep 'Cleaning up temporary files'
+            if ($UninstallOnly) {
+                Write-Info "No installer files were used in this mode."
+            }
+            else {
+                Remove-InstallerFiles
+            }
+            Write-Info "MSI logs: $MsiLogFolder"
+            Write-Info "Transcript: $TranscriptPath"
+            Write-Host ""
+            Write-Host ("[{0}] Finished with exit code {1}." -f (Get-Date -Format 'HH:mm:ss'), $ExitCode) -ForegroundColor Cyan
+        }
+
+        if ($transcriptStarted) {
+            try { Stop-Transcript | Out-Null } catch { }
+        }
+    }
+
+
+    $script:RunExitCode = $ExitCode
+}
+
+# ----------------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------------
 if ($TestBits) {
@@ -2021,273 +2295,54 @@ if ($TestBits) {
     exit (Invoke-BitsTest)
 }
 
-# --- Resolve the run mode: -Option, the menu (interactive), or the non-interactive default ---
-# NOTE: $selected holds the resolved choice as a string ('1'-'4', '5.1', '5.2'). The $Option parameter has a
-# ValidateSet attribute that stays attached to the variable, so it is only read, never reassigned.
-$selected = $Option
-if ([string]::IsNullOrEmpty($selected)) {
-    if (Test-InteractiveSession) {
-        $selected = Show-ModeMenu
-        if ($selected -eq '0') {
-            Write-Host "No option selected. Exiting without making any changes."
-            exit 0
-        }
-    }
-    else {
-        $selected = '2'
-        Write-Info "Non-interactive session and no -Option supplied: defaulting to option 2 (Install IR25R1 and update)."
-    }
-}
+$script:RunCount    = 0
+$script:RunExitCode = 0
 
-# A plain -Option 5 needs a configuration: ask interactively, otherwise require 5.1 or 5.2
-if ($selected -eq '5') {
-    if (Test-InteractiveSession) {
-        $selected = Show-ConfigMenu
-        if (-not $selected) {
-            Write-Host "No option selected. Exiting without making any changes."
-            exit 0
-        }
-    }
-    else {
-        Write-Host "Option 5 (IR Configuration Update) needs a configuration. Use -Option 5.1 (THGx) or -Option 5.2 (RIV)." -ForegroundColor Red
-        exit 1
-    }
-}
+# --- Explicit -Option: run that one option and exit with its exit code (automation) ---
+# NOTE: $Option has a ValidateSet attribute that stays attached to the variable, so it is only read, never
+# reassigned. The resolved choice lives in $selected.
+if (-not [string]::IsNullOrEmpty($Option)) {
+    $selected = $Option
 
-$RunMode       = 0
-$ConfigProfile = $null
-switch ($selected) {
-    '5.1'   { $RunMode = 5; $ConfigProfile = 'THGx' }
-    '5.2'   { $RunMode = 5; $ConfigProfile = 'RIV' }
-    default { $RunMode = [int]$selected }
-}
-
-if ($RunMode -ne 2 -and $SkipPatches) {
-    Write-Host "-SkipPatches applies only to option 2 (Install IR25R1 and update)." -ForegroundColor Red
-    exit 1
-}
-
-$UpdateOnly    = ($RunMode -eq 1)
-$UninstallOnly = ($RunMode -eq 3)
-$CheckOnly     = ($RunMode -eq 4)
-$ConfigUpdate  = ($RunMode -eq 5)
-$ModeLabel = switch ($RunMode) {
-    1 { 'Option 1 - Apply IR25R1 updates' }
-    2 { 'Option 2 - Install IR25R1 and update' }
-    3 { 'Option 3 - Force uninstall ImageRight and Sagitta Launcher' }
-    4 { 'Option 4 - IR Configuration Check' }
-    5 { "Option $selected - IR Configuration Update ($ConfigProfile)" }
-}
-if ($UpdateOnly) {
-    $script:TotalSteps  = 2
-    $script:PatchStep   = 2
-    $script:CleanupStep = 2
-}
-elseif ($UninstallOnly) {
-    $script:TotalSteps  = 4
-    $script:CleanupStep = 4
-}
-elseif ($CheckOnly) {
-    $script:TotalSteps  = 2
-    $script:CleanupStep = 2
-}
-elseif ($ConfigUpdate) {
-    $script:TotalSteps  = 4
-    $script:CleanupStep = 4
-}
-
-$ExitCode = 1
-$transcriptStarted = $false
-
-try {
-    Write-Step 1 'Pre-checks'
-    Initialize-Environment
-
-    try {
-        Start-Transcript -Path $TranscriptPath -Force | Out-Null
-        $transcriptStarted = $true
-    }
-    catch {
-        Write-Warn "Could not start transcript: $($_.Exception.Message)"
-    }
-
-    Write-Info "Script version $ScriptVersion. Mode: $ModeLabel"
-    if ($CheckOnly -or $ConfigUpdate) {
-        Write-Info "Running ImageRight applications are left open in this mode."
-    }
-    else {
-        Stop-RunningApps
-    }
-    Write-Ok "Pre-checks complete."
-
-    if ($CheckOnly) {
-        Write-Step 2 'Checking ImageRight configuration files'
-        $configFailures = Test-ImageRightConfigs
-
-        if ($configFailures -eq 0) {
-            $ExitCode = 0
-        }
-        else {
-            Write-Warn "The configuration check found $configFailures issue(s). Exit code 1."
-            $ExitCode = 1
-        }
-    }
-    elseif ($ConfigUpdate) {
-        $runningIR = Get-Process -Name 'imageright*', 'IRInstallerService' -ErrorAction SilentlyContinue
-        if ($runningIR) {
-            Write-Warn "ImageRight processes are running ($((($runningIR | Select-Object -ExpandProperty ProcessName -Unique) -join ', '))). New configs take effect after these apps/services are restarted."
-        }
-
-        Write-Step 2 'Downloading and extracting the config package'
-        Get-ConfigPackage
-
-        # Locate the profile folder anywhere in the extracted package (handles a wrapping top-level folder)
-        $packageFolderName = $ConfigPackageFolders[$ConfigProfile]
-        $configSource = Get-ChildItem -LiteralPath $ConfigExtractPath -Directory -Recurse |
-            Where-Object { $_.Name -eq $packageFolderName } |
-            Select-Object -First 1
-        if (-not $configSource) {
-            throw "Folder '$packageFolderName' was not found in the config package."
-        }
-
-        Write-Step 3 "Replacing configuration files with $ConfigProfile versions"
-        $updateErrors = Update-ImageRightConfigs -SourceFolder $configSource.FullName -Label $ConfigProfile
-
-        Write-Step 4 'Verifying configuration files'
-        $configFailures = Test-ImageRightConfigs
-
-        if ($updateErrors -gt 0 -or $configFailures -gt 0) {
-            Write-Warn "Configuration update finished with $updateErrors update error(s) and $configFailures check issue(s). Exit code 1."
-            $ExitCode = 1
-        }
-        else {
-            Write-Ok "ImageRight configuration updated to $ConfigProfile."
-            $ExitCode = 0
-        }
-    }
-    elseif ($UninstallOnly) {
-        Write-Step 2 'Uninstalling ImageRight and the Sagitta Launcher'
-        Invoke-ForceUninstall
-
-        Write-Step 3 'Removing ImageRight folders'
-        Remove-ImageRightFolders
-
-        if ($script:UninstallFailureCount -gt 0) {
-            throw "Force uninstall finished with $($script:UninstallFailureCount) problem(s). Review the output above and the logs in $MsiLogFolder."
-        }
-
-        if ($script:RebootRequired) {
-            Write-Warn "ImageRight and the Sagitta Launcher were removed, but a reboot is required to finish (exit code 3010)."
-            $ExitCode = 3010
-        }
-        else {
-            Write-Ok "ImageRight and the Sagitta Launcher were removed."
-            $ExitCode = 0
-        }
-    }
-    else {
-        if ($UpdateOnly) {
-            Write-Info "Applying updates only. The base install steps are skipped."
-
-            $desktopApp = Get-ItemProperty -Path $UninstallRegistryPaths -ErrorAction SilentlyContinue |
-                Where-Object { $_.DisplayName -eq $AppDisplayName } |
-                Select-Object -First 1
-            if (-not $desktopApp) {
-                Write-Warn "'$AppDisplayName' is not installed on this machine, so most patches will be skipped. Use option 2 to install it."
-            }
-            $skipBaseInstall = $true
-        }
-        else {
-            Write-Step 2 'Checking installed version'
-            $skipBaseInstall = Test-ImageRightUpToDate
-        }
-
-        if (-not $skipBaseInstall) {
-            Write-Step 3 'Downloading installer package'
-            Get-InstallerPackage
-
-            Write-Step 4 'Extracting and verifying installer package'
-            Expand-InstallerPackage
-            Assert-PayloadComplete
-
-            Write-Step 5 'Removing previous ImageRight version'
-            Uninstall-ImageRight
-
-            Write-Step 6 'Installing ImageRight components'
-            Install-ImageRight
-
-            Write-Step 7 'Applying configuration, service restart, and permissions'
-            Copy-ImageRightConfigs
-            Restart-ImageRightService
-            Set-IRFolderPermissions
-            if ($InstallBrowserExtensions) {
-                Write-Info "Configuring browser extension policies..."
-                Install-BrowserExtensions
+    # A plain -Option 5 needs a configuration: ask interactively, otherwise require 5.1 or 5.2
+    if ($selected -eq '5') {
+        if (Test-InteractiveSession) {
+            $selected = Show-ConfigMenu
+            if (-not $selected) {
+                Write-Host "No option selected. Exiting without making any changes."
+                exit 0
             }
         }
-        elseif (-not $UpdateOnly) {
-            Write-Info "Steps 3-7 (base install) skipped - ImageRight is already current."
-        }
-
-        # Patching always runs, even when the base install is current. Failures here are warnings only.
-        Write-Step $script:PatchStep 'Applying latest ImageRight patches'
-        if ($SkipPatches) {
-            Write-Info "Patching skipped (-SkipPatches)."
-        }
         else {
-            try {
-                Invoke-ImageRightPatching
-            }
-            catch {
-                Write-Warn "Patching stopped unexpectedly: $($_.Exception.Message)"
-                if ($script:PatchFailureCount -lt 1) { $script:PatchFailureCount = 1 }
-            }
-
-            if ($script:PatchFailureCount -gt 0) {
-                Write-Warn "$($script:PatchFailureCount) patch item(s) failed or could not be applied. This does not affect the exit code. Review the output above and the logs in $MsiLogFolder."
-            }
-        }
-
-        if ($script:RebootRequired) {
-            Write-Warn "ImageRight install/patching complete. A reboot is required (exit code 3010)."
-            $ExitCode = 3010
-        }
-        else {
-            if ($UpdateOnly) { Write-Ok "ImageRight patching complete." }
-            else             { Write-Ok "ImageRight install/patching complete." }
-            $ExitCode = 0
+            Write-Host "Option 5 (IR Configuration Update) needs a configuration. Use -Option 5.1 (THGx) or -Option 5.2 (RIV)." -ForegroundColor Red
+            exit 1
         }
     }
-}
-catch {
-    Write-Host ""
-    Write-Host "Installer execution failed: $($_.Exception.Message)" -ForegroundColor Red
-    $ExitCode = 1
-}
-finally {
-    # Options 1, 4, and 5 print no cleanup or closing summary lines. Option 5 still removes its downloaded
-    # package here, quietly (only a failure to remove it is reported).
-    if ($ConfigUpdate) {
-        Remove-ConfigPackage
-    }
 
-    if (-not ($UpdateOnly -or $CheckOnly -or $ConfigUpdate)) {
-        Write-Step $script:CleanupStep 'Cleaning up temporary files'
-        if ($UninstallOnly) {
-            Write-Info "No installer files were used in this mode."
-        }
-        else {
-            Remove-InstallerFiles
-        }
-        Write-Info "MSI logs: $MsiLogFolder"
-        Write-Info "Transcript: $TranscriptPath"
-        Write-Host ""
-        Write-Host ("[{0}] Finished with exit code {1}." -f (Get-Date -Format 'HH:mm:ss'), $ExitCode) -ForegroundColor Cyan
-    }
-
-    if ($transcriptStarted) {
-        try { Stop-Transcript | Out-Null } catch { }
-    }
+    Invoke-RunMode -Selected $selected
+    exit $script:RunExitCode
 }
 
-exit $ExitCode
+# --- No -Option and nobody to answer a prompt: default to option 2, run once, and exit ---
+if (-not (Test-InteractiveSession)) {
+    Write-Info "Non-interactive session and no -Option supplied: defaulting to option 2 (Install IR25R1 and update)."
+    Invoke-RunMode -Selected '2'
+    exit $script:RunExitCode
+}
+
+# --- Interactive: show the menu again after each option finishes, until Q is chosen ---
+while ($true) {
+    $selected = Show-ModeMenu
+    if ($selected -eq '0') { break }
+
+    Invoke-RunMode -Selected $selected
+}
+
+if ($script:RunCount -eq 0) {
+    Write-Host "No option selected. Exiting without making any changes."
+    exit 0
+}
+
+Write-Host ""
+Write-Host "Exiting."
+exit $script:RunExitCode
