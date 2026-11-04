@@ -5,24 +5,23 @@
 
 .DESCRIPTION
     Run modes (chosen from a menu when the script is run interactively):
-      Option 1 - Apply IR25R1 updates      : patching only (pre-checks, step 8). The base install is
-                                             not touched.
-      Option 2 - Install IR25R1 and update : the full flow below (install/upgrade the base, then patch).
-      Option 3 - Force uninstall           : uninstalls ImageRight and the Sagitta Launcher, then deletes
-                                             'C:\Program Files (x86)\ImageRight' and 'C:\ProgramData\ImageRight'.
-                                             Destructive and runs WITHOUT a confirmation prompt.
-      Option 4 - IR Configuration Check    : read-only report of which ImageRight config files are present and
-                                             which database each one points to, and whether each app (core
-                                             and companion) is installed. Nothing is changed or closed.
-      Option 5 - IR Configuration Update   : downloads the config package and replaces the present config
-                                             files with the chosen set, then re-checks them:
-                                               5.1 = THGx      5.2 = RIV
-      Option 6 - Destructive Removal       : LAST RESORT for when option 3 cannot remove the apps. Does NOT run
-                                             their uninstallers. Scans for ImageRight and Sagitta Launcher
-                                             files, folders, registry keys, Windows Installer registrations,
-                                             and services, lets you pick which findings to delete, then
-                                             permanently deletes them. NEVER deletes anything inside C:\Windows
-                                             or any of its subfolders. Interactive only.
+      Option 1 - Apply ImageRight 25R1 Updates       : patching only (pre-checks, step 8). The base install is not touched.
+      Option 2 - Install ImageRight 25R1 and Updates : the full flow below (install/upgrade the base, then patch).
+      Option 3 - Uninstall ImageRight                : uninstalls ImageRight and the Sagitta Launcher, then deletes
+                                                       'C:\Program Files (x86)\ImageRight' and 'C:\ProgramData\ImageRight'.
+                                                       Destructive and runs WITHOUT a confirmation prompt.
+      Option 4 - ImageRight Config Check             : read-only report of which ImageRight config files are present and
+                                                       which database each one points to, and whether each app (core
+                                                       and companion) is installed. Nothing is changed or closed.
+      Option 5 - ImageRight Config Update            : downloads the config package and replaces the present config
+                                                       files with the chosen set, then re-checks them:
+                                                         5.1 = THGx      5.2 = RIV
+      Option 6 - Destructive ImageRight Removal      : LAST RESORT for when option 3 cannot remove the apps. Does NOT run
+                                                       their uninstallers. Scans for ImageRight and Sagitta Launcher
+                                                       files, folders, registry keys, Windows Installer registrations,
+                                                       and services, lets you pick which findings to delete, then
+                                                       permanently deletes them. NEVER deletes anything inside C:\Windows
+                                                       or any of its subfolders. Interactive only.
     For automation, pass -Option 1, 2, 3, 4, 5.1, or 5.2 to skip the menu. If no -Option is given and the
     session is not interactive (no one to answer a prompt), option 2 is used; options 3, 5, and 6 are never
     chosen by default. Option 6 refuses to run when not interactive, because the findings must be reviewed.
@@ -58,10 +57,11 @@
                  (in -TestBits mode: 0 = BITS test passed,  1 = BITS test failed)
 
 .PARAMETER Option
-    Selects the run mode and skips the menu: 1 = Apply IR25R1 updates (patching only),
-    2 = Install IR25R1 and update (full install, then patching), 3 = Force uninstall ImageRight and the
-    Sagitta Launcher and delete their folders, 4 = IR Configuration Check (read-only report),
-    5.1 = IR Configuration Update with the THGx configs, 5.2 = IR Configuration Update with the RIV configs.
+    Selects the run mode and skips the menu: 1 = Apply ImageRight 25R1 Updates (patching only),
+    2 = Install ImageRight 25R1 and Updates (full install, then patching), 3 = Uninstall ImageRight (force
+    uninstall of ImageRight and the Sagitta Launcher, deleting their folders), 4 = ImageRight Config Check
+    (read-only report), 5.1 = ImageRight Config Update with the THGx configs, 5.2 = ImageRight Config Update
+    with the RIV configs.
     Plain 5 asks which configuration interactively and is rejected in a non-interactive session.
     6 = Destructive removal of ImageRight and the Sagitta Launcher without running their uninstallers
     (last resort after option 3 fails; interactive only).
@@ -115,10 +115,10 @@
       - Up-to-date threshold is $RequiredVersion (25.1.1.204).
 
     Run modes:
-      - Interactive runs show a menu: 1 = Apply IR25R1 updates, 2 = Install IR25R1 and update,
-        3 = Uninstall ImageRight, 4 = IR Configuration Check, 5 = IR Configuration Update
-        (then 1 = THGx or 2 = RIV), 6 = Destructive ImageRight Removal, Q = quit. The menu returns after each option
-        finishes and repeats until
+      - Interactive runs show a menu: 1 = Apply ImageRight 25R1 Updates, 2 = Install ImageRight 25R1 and
+        Updates, 3 = Uninstall ImageRight, 4 = ImageRight Config Check, 5 = ImageRight Config Update
+        (then 1 = THGx or 2 = RIV), 6 = Destructive ImageRight Removal, Q = quit. The menu returns after
+        each option finishes and repeats until
         Q is chosen. State (reboot flag, failure counts, BITS fallback flag) is reset for every run, and the
         transcript in $TranscriptPath is appended to after the first run so earlier output is kept.
       - With -Option, or when not interactive, the script runs that one option and exits (no menu loop).
@@ -254,8 +254,9 @@
                          The config checker (option 4, and the re-check after option 5) now reports whether each core
                          and companion app is installed (App Installed: YES/NO, via the AppName on each entry in
                          $IRConfigFiles), with separate "Core apps" and "Companion apps" summaries; pass/fail rules
-                         are unchanged. Menu labels: option 3 is "Uninstall ImageRight" and option 6 is "Destructive
-                         ImageRight Removal".
+                         are unchanged. Menu titles: 1 = Apply ImageRight 25R1 Updates, 2 = Install ImageRight 25R1 and
+                         Updates, 3 = Uninstall ImageRight, 4 = ImageRight Config Check, 5 = ImageRight Config
+                         Update, 6 = Destructive ImageRight Removal.
 #>
 
 [CmdletBinding()]
@@ -2535,7 +2536,7 @@ function Show-ConfigMenu {
     # Sub-menu for option 5. Returns '5.1' (THGx), '5.2' (RIV), or $null for Back.
     while ($true) {
         Write-Host ""
-        Write-Host "  IR Configuration Update - choose a configuration:"
+        Write-Host "  ImageRight Config Update - choose a configuration:"
         Write-Host "    1) THGx"
         Write-Host "    2) RIV"
         Write-Host "    B) Back"
@@ -2558,11 +2559,11 @@ function Show-ModeMenu {
         Write-Host "================================================================" -ForegroundColor Cyan
         Write-Host "|                  ImageRight 25R1 Deployment                  |" -ForegroundColor Cyan
         Write-Host "================================================================" -ForegroundColor Cyan
-        Write-Host "  1) Apply IR25R1 updates"
-        Write-Host "  2) Install IR25R1 and update"
+        Write-Host "  1) Apply ImageRight 25R1 Updates"
+        Write-Host "  2) Install ImageRight 25R1 and Updates"
         Write-Host "  3) Uninstall ImageRight"
-        Write-Host "  4) IR Configuration Check"
-        Write-Host "  5) IR Configuration Update"
+        Write-Host "  4) ImageRight Config Check"
+        Write-Host "  5) ImageRight Config Update"
         Write-Host "  6) Destructive ImageRight Removal"
         Write-Host "  Q) Quit"
         Write-Host ""
@@ -2693,7 +2694,7 @@ function Invoke-RunMode {
     }
 
     if ($RunMode -ne 2 -and $SkipPatches) {
-        Write-Host "-SkipPatches applies only to option 2 (Install IR25R1 and update)." -ForegroundColor Red
+        Write-Host "-SkipPatches applies only to option 2 (Install ImageRight 25R1 and Updates)." -ForegroundColor Red
         return
     }
 
@@ -2709,12 +2710,12 @@ function Invoke-RunMode {
     $ConfigUpdate  = ($RunMode -eq 5)
     $DeepRemove    = ($RunMode -eq 6)
     $ModeLabel = switch ($RunMode) {
-        1 { 'Option 1 - Apply IR25R1 updates' }
-        2 { 'Option 2 - Install IR25R1 and update' }
-        3 { 'Option 3 - Force uninstall ImageRight and Sagitta Launcher' }
-        4 { 'Option 4 - IR Configuration Check' }
-        5 { "Option $Selected - IR Configuration Update ($ConfigProfile)" }
-        6 { 'Option 6 - Destructive removal of ImageRight and Sagitta Launcher' }
+        1 { 'Option 1 - Apply ImageRight 25R1 Updates' }
+        2 { 'Option 2 - Install ImageRight 25R1 and Updates' }
+        3 { 'Option 3 - Uninstall ImageRight' }
+        4 { 'Option 4 - ImageRight Config Check' }
+        5 { "Option $Selected - ImageRight Config Update ($ConfigProfile)" }
+        6 { 'Option 6 - Destructive ImageRight Removal' }
     }
     if ($UpdateOnly) {
         $script:TotalSteps  = 2
@@ -3000,7 +3001,7 @@ if (-not [string]::IsNullOrEmpty($Option)) {
             }
         }
         else {
-            Write-Host "Option 5 (IR Configuration Update) needs a configuration. Use -Option 5.1 (THGx) or -Option 5.2 (RIV)." -ForegroundColor Red
+            Write-Host "Option 5 (ImageRight Config Update) needs a configuration. Use -Option 5.1 (THGx) or -Option 5.2 (RIV)." -ForegroundColor Red
             exit 1
         }
     }
@@ -3011,7 +3012,7 @@ if (-not [string]::IsNullOrEmpty($Option)) {
 
 # --- No -Option and nobody to answer a prompt: default to option 2, run once, and exit ---
 if (-not (Test-InteractiveSession)) {
-    Write-Info "Non-interactive session and no -Option supplied: defaulting to option 2 (Install IR25R1 and update)."
+    Write-Info "Non-interactive session and no -Option supplied: defaulting to option 2 (Install ImageRight 25R1 and Updates)."
     Invoke-RunMode -Selected '2'
     exit $script:RunExitCode
 }
