@@ -12,7 +12,8 @@
                                              'C:\Program Files (x86)\ImageRight' and 'C:\ProgramData\ImageRight'.
                                              Destructive and runs WITHOUT a confirmation prompt.
       Option 4 - IR Configuration Check    : read-only report of which ImageRight config files are present and
-                                             which database each one points to. Nothing is changed or closed.
+                                             which database each one points to, and whether each app (core
+                                             and companion) is installed. Nothing is changed or closed.
       Option 5 - IR Configuration Update   : downloads the config package and replaces the present config
                                              files with the chosen set, then re-checks them:
                                                5.1 = THGx      5.2 = RIV
@@ -99,7 +100,7 @@
     .\Install-ImageRight25R1.ps1 -Option 5.1
 
 .NOTES
-    Version      : 1.7.2
+    Version      : 1.3.0
     Baseline date: 2026-10-12
     Target       : ImageRight 25R1 (Vertafore)
 
@@ -115,8 +116,8 @@
 
     Run modes:
       - Interactive runs show a menu: 1 = Apply IR25R1 updates, 2 = Install IR25R1 and update,
-        3 = Uninstall IR and Cleanup, 4 = IR Configuration Check, 5 = IR Configuration Update
-        (then 1 = THGx or 2 = RIV), 6 = Destructive Removal, Q = quit. The menu returns after each option
+        3 = Uninstall ImageRight, 4 = IR Configuration Check, 5 = IR Configuration Update
+        (then 1 = THGx or 2 = RIV), 6 = Destructive ImageRight Removal, Q = quit. The menu returns after each option
         finishes and repeats until
         Q is chosen. State (reboot flag, failure counts, BITS fallback flag) is reset for every run, and the
         transcript in $TranscriptPath is appended to after the first run so earlier output is kept.
@@ -136,7 +137,12 @@
       - Option 4 (config check) only reads the config files in $IRConfigFiles and reports, per file, whether
         it is present and which database it points to ($ConfigDatabases identifying strings: THGx,
         Riverlands, THG3). A file matching several strings is a multi-database instance and is noted, not
-        failed. Required files must exist; optional files belong to companion apps and are noted only. It
+        failed. Required files must exist; optional files belong to companion apps and are noted only. Each
+        app, core (Desktop, Installer Service, Connect, AMS360 Link) and companion (EMC, Workflow Studio,
+        Scanner, Configuration Editor), is also looked up in Add/Remove Programs by the AppName in
+        $IRConfigFiles and reported as YES or NO (the config file has its own line, so the app line says
+        nothing about it). A companion app that is installed but has no config file is flagged on the config
+        line but does not fail the check; a missing core config always fails. It
         does not close ImageRight and prints only the check report (no cleanup or closing summary lines).
         Exit 0 = pass, 1 = any issue.
       - Option 5 (config update, 5.1 THGx / 5.2 RIV) downloads the config package ($ConfigPackageUrl, BITS
@@ -204,68 +210,52 @@
     Change log:
       1.0.0  2026-10-12  Initial commit.
       1.1.0  2026-10-20  Downloads now use BITS (Start-BitsTransfer) with progress reporting; Invoke-WebRequest is
-                         retained as a fallback if BITS is unavailable or fails. Added -TestBits switch to test
-                         only the BITS download path (no install).
-      1.2.0  2026-10-20  Added Step 8: ImageRight patching. Discovers the latest .msp patches on the vendor release
-                         notes page, checks the machine first, then downloads (BITS with Invoke-WebRequest
-                         fallback), installs, verifies, and cleans up only what is needed. Added -SkipPatches
-                         switch. Cleanup is now Step 9. Fixed compressed-GUID char concatenation in the packed
-                         product/patch code conversion (forces string concatenation).
-      1.2.1  2026-10-20  Patching (Step 8) now runs on every execution, including when the base install is
-                         already current (steps 3-7 are skipped in that case). Patch failures are now
-                         warnings only and no longer affect the exit code.
-      1.2.2  2026-10-20  Added $PatchRegisteredNames (patch prefix -> registered display name) for FrontEnd,
-                         IRMicrosoftAddIn, IRConnect and IRDesktop patches. The "name doesn't contain ..."
-                         console warning now only appears when an .msp registers under a name that differs
-                         from its mapping (or when a prefix has no mapping).
-      1.2.3  2026-10-20  Added $PatchRegisteredNames entries for the remaining patches: IRAdobe, IRBrowser,
-                         IRWFStudio, IRAdmin and IRScanner. All patch prefixes are now mapped.
-      1.3.0  2026-10-20  Added a run-mode menu: 1 = Apply IR25R1 updates (patching only), 2 = Install IR25R1 and
-                         update (full flow). Added -Option 1|2 to skip the menu for automation; a
-                         non-interactive session without -Option defaults to option 2.
-      1.4.0  2026-10-20  Added option 3: force uninstall of ImageRight and the Sagitta Launcher plus deletion of
-                         'C:\Program Files (x86)\ImageRight' and 'C:\ProgramData\ImageRight'. Interactive runs
-                         require a typed YES unless -Force is used. Added -Force. -SkipPatches is now valid
-                         with option 2 only.
-      1.4.1  2026-10-20  Removed the typed-YES confirmation for option 3 and the -Force switch. Option 3 now runs
-                         immediately when selected from the menu or passed with -Option 3.
-      1.4.2  2026-10-20  Fixed an error when quitting from the menu ("The variable cannot be validated because the
-                         value 0 is not a valid value for the Option variable"): the resolved choice is now kept in
-                         $RunMode instead of reassigning the validated $Option parameter. Menu banner and option 3
-                         label reworded.
-      1.5.0  2026-10-23  Integrated the ImageRight config check/update script: option 4 = IR Configuration Check
+                         retained as a fallback if BITS is unavailable or fails. Added -TestBits switch to test only
+                         the BITS download path (no install). Added Step 8: ImageRight patching, which discovers the
+                         latest .msp patches on the vendor release notes page, checks the machine first, then
+                         downloads, installs, verifies, and cleans up only what is needed. It runs on every
+                         execution (including when the base install is already current), patch failures are
+                         warnings that don't affect the exit code, and -SkipPatches skips it. Added
+                         $PatchRegisteredNames (patch prefix -> registered display name) for every patch prefix so
+                         the name-mismatch console note only appears for an unexpected name. Fixed compressed-GUID
+                         char concatenation in the packed product/patch code conversion. Added a run-mode menu
+                         (1 = Apply IR25R1 updates, 2 = Install IR25R1 and update) with -Option to skip it for
+                         automation; a non-interactive session without -Option defaults to option 2. Added option 3:
+                         force uninstall of ImageRight and the Sagitta Launcher plus deletion of
+                         'C:\Program Files (x86)\ImageRight' and 'C:\ProgramData\ImageRight', which runs immediately
+                         (no confirmation prompt); -SkipPatches is valid with option 2 only. Fixed an error when
+                         quitting from the menu (the resolved choice is kept in $RunMode instead of reassigning the
+                         validated $Option parameter).
+      1.2.0  2026-10-23  Integrated the ImageRight config check/update script: option 4 = IR Configuration Check
                          (read-only report) and option 5 = IR Configuration Update with sub-options 5.1 = THGx and
-                         5.2 = RIV. -Option now accepts 1, 2, 3, 4, 5, 5.1, and 5.2 (string). Options 4 and 5 do
-                         not close running ImageRight processes. The config package download uses the shared
-                         BITS-with-fallback downloader.
-      1.5.1  2026-10-23  Option 4 (IR Configuration Check) no longer prints the cleanup step, MSI log/transcript
-                         paths, or the closing "Finished with exit code" line. It now shows 2 steps.
-      1.5.2  2026-10-23  Same for option 5 (IR Configuration Update): no cleanup step, "Removed ..." lines, MSI
-                         log/transcript paths, or closing "Finished with exit code" line. It now shows 4 steps.
-                         The downloaded package is still removed, quietly; failures to remove it are still reported.
-      1.5.3  2026-10-23  Same for option 1 (Apply IR25R1 updates): no cleanup step, "No installer files" line, MSI
-                         log/transcript paths, or closing "Finished with exit code" line. It now shows 2 steps.
-      1.5.4  2026-10-23  Gated the patch process on app detection: the base apps are now detected first, before the
+                         5.2 = RIV. -Option now accepts 1, 2, 3, 4, 5, 5.1, and 5.2 (string). Options 4 and 5 do not
+                         close running ImageRight processes, and the config package download uses the shared
+                         BITS-with-fallback downloader. Options 1, 4, and 5 print no cleanup step, MSI log/transcript
+                         paths, or closing "Finished with exit code" line (they show 2, 2, and 4 steps; option 5
+                         still removes its downloaded package quietly and reports any failure to remove it). The
+                         patch process is gated on app detection: the base apps are detected first, before the
                          release notes page is fetched. If none are installed, patching ends immediately with
-                         nothing downloaded. Patches for apps that aren't installed are no longer looked up,
-                         downloaded, or checked.
-      1.6.0  2026-10-23  The interactive menu now loops: after each option finishes it returns to the menu until Q
-                         is selected. -Option and non-interactive runs still run once and exit. Run logic moved
-                         into Invoke-RunMode with per-run state reset; the transcript is appended after the first
-                         run. Quitting exits with the last run's exit code (0 if nothing was run).
-      1.7.0  2026-10-23  Added option 6: destructive removal of ImageRight and the Sagitta Launcher for when option 3
-                         cannot uninstall them. Built from the Revo-style deep uninstaller (leftover-only mode, no
-                         uninstaller run): scans files, folders, registry, services, and scheduled tasks by name,
-                         plus Windows Installer product registrations, shows the findings for selection (nothing
-                         pre-selected), and permanently deletes the chosen items. Interactive sessions only.
-      1.7.1  2026-10-23  Option 6 can no longer delete anything inside C:\Windows or its subfolders: findings inside
-                         Windows are excluded, every folder/file is re-checked right before deletion, and any
-                         junction/symlink that reaches into Windows blocks the item (links inside a tree are
-                         removed as links first, never followed). Matching scheduled tasks are now only listed,
-                         not removed, because their definitions live under C:\Windows\System32\Tasks.
-      1.7.2  2026-10-23  Option 6 no longer lists or offers removal of the SharedAccess or shpamsvc items. The names live
-                         in the new $DeepExcludeNames setting; matching items are dropped from the findings and are
-                         also refused at deletion time as a safety net.
+                         nothing downloaded, and patches for apps that aren't installed are never looked up,
+                         downloaded, or checked. The interactive menu now loops: after each option finishes it
+                         returns to the menu until Q is selected. -Option and non-interactive runs still run once
+                         and exit. Run logic moved into Invoke-RunMode with per-run state reset; the transcript is
+                         appended after the first run. Quitting exits with the last run's exit code (0 if nothing
+                         was run).
+      1.3.0  2026-11-04  Added option 6, Destructive ImageRight Removal, for when option 3 cannot uninstall the apps.
+                         Built from the Revo-style deep uninstaller (leftover-only mode, no uninstaller run): scans
+                         files, folders, registry, services, and Windows Installer product registrations by name,
+                         shows the findings for selection (nothing pre-selected), and permanently deletes the chosen
+                         items. Interactive sessions only. Never deletes anything inside C:\Windows or its
+                         subfolders: findings there are excluded, every folder/file is re-checked right before
+                         deletion, and any junction/symlink that reaches into Windows blocks the item (links inside
+                         a tree are removed as links, never followed). Matching scheduled tasks are only listed, not
+                         removed, because their definitions live under C:\Windows\System32\Tasks. SharedAccess and
+                         shpamsvc are never listed or removed ($DeepExcludeNames).
+                         The config checker (option 4, and the re-check after option 5) now reports whether each core
+                         and companion app is installed (App Installed: YES/NO, via the AppName on each entry in
+                         $IRConfigFiles), with separate "Core apps" and "Companion apps" summaries; pass/fail rules
+                         are unchanged. Menu labels: option 3 is "Uninstall ImageRight" and option 6 is "Destructive
+                         ImageRight Removal".
 #>
 
 [CmdletBinding()]
@@ -281,7 +271,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ----------------------------------------------------------------------------
 # Settings
 # ----------------------------------------------------------------------------
-$ScriptVersion    = '1.7.2'                       # Keep in sync with Version in .NOTES above
+$ScriptVersion    = '1.3.0'                       # Keep in sync with Version in .NOTES above
 $AppDisplayName   = 'ImageRight Desktop'          # Must match DisplayName in Add/Remove Programs exactly
 $RequiredVersion  = [version]'25.1.1.204'         # Installed version >= this is treated as up to date
 $TempRoot         = 'C:\Temp'
@@ -371,16 +361,18 @@ $ConfigPackageFolders = @{
     'RIV'  = 'RIV'
 }
 
-# Required = must exist on all devices. Optional = companion app config (missing = app not installed).
+# Required = core app; its config must exist on all devices. Optional = companion app config. AppName = the Add/Remove
+# Programs name of the app (wildcards ok), used to report whether the app is installed. (AMS360 Link is an integration
+# installed with the Front End Integration app, so it uses that app's name.)
 $IRConfigFiles = @(
-    [PSCustomObject]@{ Name = 'ImageRight Desktop';              Required = $true;  Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.desktop.exe.config' }
-    [PSCustomObject]@{ Name = 'ImageRight Installer Service';    Required = $true;  Path = 'C:\Program Files (x86)\ImageRight\InstallerService\IRInstallerService.exe.config' }
-    [PSCustomObject]@{ Name = 'ImageRight Connect';              Required = $true;  Path = 'C:\Program Files (x86)\ImageRight\IRConnect\ImageRight.Connect.exe.config' }
-    [PSCustomObject]@{ Name = 'ImageRight AMS360 Link';          Required = $true;  Path = 'C:\ProgramData\ImageRight\Integration\AMS360Link.config' }
-    [PSCustomObject]@{ Name = 'ImageRight EMC';                  Required = $false; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.emc.exe.config' }
-    [PSCustomObject]@{ Name = 'ImageRight Workflow Studio';      Required = $false; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.workflow.studio.exe.config' }
-    [PSCustomObject]@{ Name = 'ImageRight Scanner';              Required = $false; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.scanner.exe.config' }
-    [PSCustomObject]@{ Name = 'ImageRight Configuration Editor'; Required = $false; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.configuration.editor.exe.config' }
+    [PSCustomObject]@{ Name = 'ImageRight Desktop';              Required = $true;  AppName = 'ImageRight Desktop'; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.desktop.exe.config' }
+    [PSCustomObject]@{ Name = 'ImageRight Installer Service';    Required = $true;  AppName = 'ImageRight Installer Service'; Path = 'C:\Program Files (x86)\ImageRight\InstallerService\IRInstallerService.exe.config' }
+    [PSCustomObject]@{ Name = 'ImageRight Connect';              Required = $true;  AppName = 'ImageRight Connect'; Path = 'C:\Program Files (x86)\ImageRight\IRConnect\ImageRight.Connect.exe.config' }
+    [PSCustomObject]@{ Name = 'ImageRight AMS360 Link';          Required = $true;  AppName = 'ImageRight Front End Integration'; Path = 'C:\ProgramData\ImageRight\Integration\AMS360Link.config' }
+    [PSCustomObject]@{ Name = 'ImageRight EMC';                  Required = $false; AppName = 'Imageright Enterprise Management Console'; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.emc.exe.config' }
+    [PSCustomObject]@{ Name = 'ImageRight Workflow Studio';      Required = $false; AppName = 'ImageRight Workflow Studio'; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.workflow.studio.exe.config' }
+    [PSCustomObject]@{ Name = 'ImageRight Scanner';              Required = $false; AppName = 'ImageRight Scanner'; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.scanner.exe.config' }
+    [PSCustomObject]@{ Name = 'ImageRight Configuration Editor'; Required = $false; AppName = 'ImageRight Configuration Editor'; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.configuration.editor.exe.config' }
 )
 
 # --- Destructive removal (option 6) ---
@@ -1722,12 +1714,23 @@ function Test-ImageRightConfigs {
     Write-Host "ImageRight config check on $env:COMPUTERNAME" -ForegroundColor Cyan
     Write-Host ("-" * 70)
 
+    # Companion apps are looked up in Add/Remove Programs once, up front
+    $InstalledApps = @(Get-InstalledApplication)
+
     $Results = foreach ($Config in $IRConfigFiles) {
         $File     = $Config.Path
         $Exists   = Test-Path -LiteralPath $File -PathType Leaf
         $Found    = @()
         $Note     = ""
         $ReadOK   = $false
+
+        # Is the companion app itself installed? (only entries that have an AppName)
+        $AppEntry    = $null
+        $AppDetected = $false
+        if ($Config.AppName) {
+            $AppEntry    = Test-AppInstalled -DisplayName $Config.AppName -InstalledApps $InstalledApps
+            $AppDetected = [bool]$AppEntry
+        }
 
         if ($Exists) {
             try {
@@ -1746,10 +1749,19 @@ function Test-ImageRightConfigs {
         Write-Host ""
         Write-Host $Config.Name
 
+        if ($Config.AppName) {
+            if ($AppDetected) { Write-Host "   App Installed    : YES" -ForegroundColor Green }
+            else              { Write-Host "   App Installed    : NO"  -ForegroundColor DarkGray }
+        }
+
         if (-not $Exists) {
             if ($Config.Required) {
                 Write-Host "   Config Present   : NO (required file missing)" -ForegroundColor Red
                 $Status = "Missing"
+            }
+            elseif ($AppDetected) {
+                Write-Host "   Config Present   : NO (the app is installed but its config file is missing)" -ForegroundColor Yellow
+                $Status = "ConfigMissing"
             }
             else {
                 Write-Host "   Config Present   : NO (companion app not installed)" -ForegroundColor DarkGray
@@ -1783,6 +1795,8 @@ function Test-ImageRightConfigs {
             File     = $File
             Required = $Config.Required
             Present  = $Exists
+            AppName  = $Config.AppName
+            AppInstalled = $AppDetected
             Database = $Status
             Matches  = $Found
             Note     = $Note
@@ -1809,6 +1823,21 @@ function Test-ImageRightConfigs {
     if ($NoDb)         { Write-Host "  No database             : $NoDb"         -ForegroundColor Red }
     if ($Missing)      { Write-Host "  Required files missing  : $Missing"      -ForegroundColor Red }
     if ($ReadErrors)   { Write-Host "  Unreadable files        : $ReadErrors"   -ForegroundColor Yellow }
+    $AppNoConfig = @($Results | Where-Object { $_.Database -eq "ConfigMissing" }).Count
+    if ($AppNoConfig)  { Write-Host "  Installed app, no config: $AppNoConfig"  -ForegroundColor Yellow }
+
+    # Apps: installed or not (core apps first, then companion apps)
+    foreach ($Group in @(@{ Title = 'Core apps'; Required = $true }, @{ Title = 'Companion apps'; Required = $false })) {
+        $GroupApps = @($Results | Where-Object { $_.AppName -and ($_.Required -eq $Group.Required) })
+        if ($GroupApps.Count -gt 0) {
+            Write-Host ""
+            Write-Host "$($Group.Title):" -ForegroundColor Cyan
+            foreach ($c in $GroupApps) {
+                if ($c.AppInstalled) { Write-Host ("  {0,-32}: YES" -f $c.Name) -ForegroundColor Green }
+                else                 { Write-Host ("  {0,-32}: NO"  -f $c.Name) -ForegroundColor DarkGray }
+            }
+        }
+    }
 
     # Multi-database (special instance) notice
     if ($Multiple) {
@@ -1819,7 +1848,7 @@ function Test-ImageRightConfigs {
     }
 
     # Pass = no required files missing, and every present file maps to at least one known database
-    $PassStatuses = @($ConfigDatabases.Values) + "Multiple" + "NotInstalled"
+    $PassStatuses = @($ConfigDatabases.Values) + "Multiple" + "NotInstalled" + "ConfigMissing"
     $Failures = @($Results | Where-Object { $PassStatuses -notcontains $_.Database }).Count
 
     Write-Host ""
@@ -2531,10 +2560,10 @@ function Show-ModeMenu {
         Write-Host "================================================================" -ForegroundColor Cyan
         Write-Host "  1) Apply IR25R1 updates"
         Write-Host "  2) Install IR25R1 and update"
-        Write-Host "  3) Uninstall IR and Cleanup"
+        Write-Host "  3) Uninstall ImageRight"
         Write-Host "  4) IR Configuration Check"
         Write-Host "  5) IR Configuration Update"
-        Write-Host "  6) Destructive Removal of IR (use only if option 3 fails)"
+        Write-Host "  6) Destructive ImageRight Removal"
         Write-Host "  Q) Quit"
         Write-Host ""
 
