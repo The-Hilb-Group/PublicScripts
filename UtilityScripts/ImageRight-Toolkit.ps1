@@ -16,9 +16,15 @@
       Option 5 - IR Configuration Update   : downloads the config package and replaces the present config
                                              files with the chosen set, then re-checks them:
                                                5.1 = THGx      5.2 = RIV
+      Option 6 - Destructive Removal       : LAST RESORT for when option 3 cannot remove the apps. Does NOT run
+                                             their uninstallers. Scans for ImageRight and Sagitta Launcher
+                                             files, folders, registry keys, Windows Installer registrations,
+                                             and services, lets you pick which findings to delete, then
+                                             permanently deletes them. NEVER deletes anything inside C:\Windows
+                                             or any of its subfolders. Interactive only.
     For automation, pass -Option 1, 2, 3, 4, 5.1, or 5.2 to skip the menu. If no -Option is given and the
-    session is not interactive (no one to answer a prompt), option 2 is used; options 3 and 5 are never
-    chosen by default.
+    session is not interactive (no one to answer a prompt), option 2 is used; options 3, 5, and 6 are never
+    chosen by default. Option 6 refuses to run when not interactive, because the findings must be reviewed.
     In an interactive session the menu comes back after each option finishes and keeps coming back until Q
     is chosen. With -Option (or when not interactive) the script runs that one option and exits.
 
@@ -46,6 +52,8 @@
                  of the last option that ran.
                  Option 3: exits 1 if any product failed to uninstall or any folder could not be fully deleted.
                  Options 4 and 5: 0 = every config passes the check, 1 = any config issue or update error.
+                 Option 6: 0 = nothing found, nothing selected, or everything selected was removed;
+                 1 = any selected item failed to delete, or the session was not interactive.
                  (in -TestBits mode: 0 = BITS test passed,  1 = BITS test failed)
 
 .PARAMETER Option
@@ -54,6 +62,8 @@
     Sagitta Launcher and delete their folders, 4 = IR Configuration Check (read-only report),
     5.1 = IR Configuration Update with the THGx configs, 5.2 = IR Configuration Update with the RIV configs.
     Plain 5 asks which configuration interactively and is rejected in a non-interactive session.
+    6 = Destructive removal of ImageRight and the Sagitta Launcher without running their uninstallers
+    (last resort after option 3 fails; interactive only).
     If omitted, a menu is shown in an interactive session and returns after each option until Q is
     chosen; in a non-interactive session option 2 is used.
 
@@ -89,7 +99,7 @@
     .\Install-ImageRight25R1.ps1 -Option 5.1
 
 .NOTES
-    Version      : 1.6.0
+    Version      : 1.7.2
     Baseline date: 2026-10-12
     Target       : ImageRight 25R1 (Vertafore)
 
@@ -106,11 +116,12 @@
     Run modes:
       - Interactive runs show a menu: 1 = Apply IR25R1 updates, 2 = Install IR25R1 and update,
         3 = Uninstall IR and Cleanup, 4 = IR Configuration Check, 5 = IR Configuration Update
-        (then 1 = THGx or 2 = RIV), Q = quit. The menu returns after each option finishes and repeats until
+        (then 1 = THGx or 2 = RIV), 6 = Destructive Removal, Q = quit. The menu returns after each option
+        finishes and repeats until
         Q is chosen. State (reboot flag, failure counts, BITS fallback flag) is reset for every run, and the
         transcript in $TranscriptPath is appended to after the first run so earlier output is kept.
       - With -Option, or when not interactive, the script runs that one option and exits (no menu loop).
-      - -Option 1, 2, 3, 4, 5.1, or 5.2 skip the menu for automation (Intune, SCCM, RMM). With no -Option and no
+      - -Option 1, 2, 3, 4, 5.1, 5.2, or 6 skip the menu for automation (Intune, SCCM, RMM). With no -Option and no
         interactive console, option 2 is used, which matches how earlier versions behaved. Passing -Option
         explicitly in your deployment tool is recommended.
       - -TestBits is handled before the menu and never shows it.
@@ -138,6 +149,31 @@
         the package, in which case a note says so). ImageRight is not closed; a warning
         is shown if it is running, since new configs apply after it is restarted. Exit 0 = success, 1 = any
         update error or failed re-check.
+      - Option 6 (destructive removal) is the last resort when option 3 cannot uninstall the apps. It does
+        NOT run any uninstaller. It stops ImageRight/Sagitta processes and the installer service, then scans
+        for items whose names start with a term in $DeepRemoveTerms (plus names and install folders found in
+        Add/Remove Programs) in: Program Files, ProgramData, AppData, Start Menu, and Desktop folders; the
+        SOFTWARE registry hives (also under a matching publisher folder/key); Add/Remove Programs entries;
+        Windows Installer product registrations (so a later reinstall isn't blocked); and services.
+        Matching scheduled tasks are reported but never removed (see below). The findings are listed with
+        nothing selected by default and you
+        choose which to delete (Ids, ranges, 'all', or blank for none). Deletion is PERMANENT with no backup
+        or undo. Matching is name-based, so review every finding. It refuses to run when not interactive.
+        Limits: HKCU and AppData are scanned only for the account running the script, and other users'
+        profiles are not scanned. Services are deleted with sc.exe (open handles may need a reboot). Exit 0 =
+        nothing found / nothing selected / all removed, 1 = any failure.
+      - Windows directory protection (option 6): nothing inside C:\Windows, %windir%, %SystemRoot%, or any
+        subfolder is ever deleted. This is enforced three times: (1) findings inside Windows are never
+        offered; (2) each folder/file is re-checked immediately before deletion and skipped if it is inside
+        Windows; (3) any junction or symbolic link that is the item, a parent of it, or inside it and points
+        into Windows (or whose target can't be determined) makes the whole item refuse to delete. Links
+        inside a tree are removed as links first, so a delete can never follow one into another folder.
+        Unresolvable paths are treated as protected. Scheduled tasks are stored under
+        C:\Windows\System32\Tasks, so matching tasks are only listed for manual removal. Services and
+        registry keys are registry edits (not file deletions) and are still removed when selected.
+      - Always-excluded items (option 6): anything named in $DeepExcludeNames (currently SharedAccess and
+        shpamsvc) is never listed or offered, whatever type it is (service, or any file, folder, or registry
+        path with that name as a segment). Each selected item is also re-checked right before deletion.
 
     Patching (Step 8):
       - Runs on every execution, after the base install (or on its own when ImageRight is already
@@ -217,11 +253,24 @@
                          is selected. -Option and non-interactive runs still run once and exit. Run logic moved
                          into Invoke-RunMode with per-run state reset; the transcript is appended after the first
                          run. Quitting exits with the last run's exit code (0 if nothing was run).
+      1.7.0  2026-10-23  Added option 6: destructive removal of ImageRight and the Sagitta Launcher for when option 3
+                         cannot uninstall them. Built from the Revo-style deep uninstaller (leftover-only mode, no
+                         uninstaller run): scans files, folders, registry, services, and scheduled tasks by name,
+                         plus Windows Installer product registrations, shows the findings for selection (nothing
+                         pre-selected), and permanently deletes the chosen items. Interactive sessions only.
+      1.7.1  2026-10-23  Option 6 can no longer delete anything inside C:\Windows or its subfolders: findings inside
+                         Windows are excluded, every folder/file is re-checked right before deletion, and any
+                         junction/symlink that reaches into Windows blocks the item (links inside a tree are
+                         removed as links first, never followed). Matching scheduled tasks are now only listed,
+                         not removed, because their definitions live under C:\Windows\System32\Tasks.
+      1.7.2  2026-10-23  Option 6 no longer lists or offers removal of the SharedAccess or shpamsvc items. The names live
+                         in the new $DeepExcludeNames setting; matching items are dropped from the findings and are
+                         also refused at deletion time as a safety net.
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet('1', '2', '3', '4', '5', '5.1', '5.2')][string]$Option,
+    [ValidateSet('1', '2', '3', '4', '5', '5.1', '5.2', '6')][string]$Option,
     [switch]$TestBits,
     [switch]$SkipPatches
 )
@@ -232,7 +281,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ----------------------------------------------------------------------------
 # Settings
 # ----------------------------------------------------------------------------
-$ScriptVersion    = '1.6.0'                       # Keep in sync with Version in .NOTES above
+$ScriptVersion    = '1.7.2'                       # Keep in sync with Version in .NOTES above
 $AppDisplayName   = 'ImageRight Desktop'          # Must match DisplayName in Add/Remove Programs exactly
 $RequiredVersion  = [version]'25.1.1.204'         # Installed version >= this is treated as up to date
 $TempRoot         = 'C:\Temp'
@@ -333,6 +382,38 @@ $IRConfigFiles = @(
     [PSCustomObject]@{ Name = 'ImageRight Scanner';              Required = $false; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.scanner.exe.config' }
     [PSCustomObject]@{ Name = 'ImageRight Configuration Editor'; Required = $false; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.configuration.editor.exe.config' }
 )
+
+# --- Destructive removal (option 6) ---
+# Name prefixes matched (case-insensitive) against files, folders, registry keys, services, and scheduled
+# tasks. Names and install folders found in Add/Remove Programs are added to these automatically.
+$DeepRemoveTerms = @('ImageRight', 'Sagitta Launcher')
+
+# Search terms that are too generic to match on.
+$DeepGenericTerms = @(
+    'Microsoft', 'Windows', 'Common Files', 'Intel', 'AMD', 'NVIDIA', 'Google', 'Apple',
+    'Packages', 'Temp', 'Programs', 'Installer', 'Setup', 'Update', 'Updater', 'Driver',
+    'Drivers', 'Classes', 'Policies', 'Clients', 'RegisteredApplications', 'WOW6432Node',
+    'ODBC', 'bin', 'app', 'x64', 'x86', 'current', 'Program Files', 'Microsoft Corporation'
+)
+
+# Folders that must never be flagged for deletion themselves.
+$DeepProtectedPaths = @(
+    $env:SystemDrive, $env:windir, $env:ProgramFiles, ${env:ProgramFiles(x86)},
+    $env:ProgramData, $env:APPDATA, $env:LOCALAPPDATA, "$env:LOCALAPPDATA\Programs",
+    $env:USERPROFILE, $env:PUBLIC, "$env:PUBLIC\Desktop",
+    "$env:ProgramFiles\Common Files", "${env:ProgramFiles(x86)}\Common Files",
+    "$env:ProgramData\Microsoft\Windows\Start Menu\Programs",
+    "$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
+    [Environment]::GetFolderPath('Desktop')
+) | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }
+
+# Option 6 must NEVER delete anything inside these folders (or any of their subfolders), whatever the scan finds.
+$DeepNeverDeleteRoots = @('C:\Windows', $env:windir, $env:SystemRoot) |
+    Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') } | Sort-Object -Unique
+
+# Option 6 never lists or removes these (core Windows items that must be left alone). Matched case-insensitively
+# against a service's name and against each segment of a file, folder, or registry path.
+$DeepExcludeNames = @('SharedAccess', 'shpamsvc')
 
 # Browser extension push is currently disabled (matches the original script).
 # Set to $true to re-enable.
@@ -1883,6 +1964,530 @@ function Update-ImageRightConfigs {
 }
 
 # ----------------------------------------------------------------------------
+# Destructive removal (option 6)
+# Built from the Revo-style deep uninstaller in leftover-only mode: the applications' own uninstallers are
+# NOT run. Scans by name, shows the findings, and permanently deletes the ones you select.
+# ----------------------------------------------------------------------------
+function Get-CleanName {
+    param([string]$Text)
+    if (-not $Text) { return $null }
+    $t = $Text -replace '\s*\([^)]*\)', ''            # drop "(x64)", "(64-bit)", etc.
+    $t = $t   -replace '\s+v?\d+\.\d+.*$', ''         # drop trailing version "23.01", "v2.4.1 ..."
+    $t = $t   -replace '\s+(x64|x86|64-bit|32-bit)$', ''
+    $t.Trim()
+}
+
+function Get-CleanPublisher {
+    param([string]$Text)
+    if (-not $Text) { return $null }
+    ($Text -replace '[,\.]?\s*(Inc\.?|LLC|L\.L\.C\.|Ltd\.?|Limited|Corporation|Corp\.?|GmbH|Co\.?|S\.A\.?|AG)\s*$', '').Trim()
+}
+
+function Test-ProtectedPath {
+    param([string]$Path)
+    if (-not $Path) { return $true }
+    $p = $Path.TrimEnd('\')
+    if (-not $p) { return $true }
+    if ($DeepProtectedPaths -contains $p) { return $true }
+    if ($env:windir -and $p.StartsWith($env:windir, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    $false
+}
+
+function Test-NameMatch {
+    param([string]$Name, [string[]]$Terms)
+    if (-not $Name) { return $false }
+    foreach ($t in $Terms) {
+        if ($Name.StartsWith($t, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    $false
+}
+
+function ConvertFrom-Selection {
+    param([string]$Text, [int]$Max)
+    if (-not $Text) { return @() }
+    if ($Text -match '^\s*all\s*$') { return 1..$Max }
+    $out = @()
+    foreach ($part in ($Text -split ',')) {
+        $p = $part.Trim()
+        if ($p -match '^(\d+)\s*-\s*(\d+)$') { $out += [int]$Matches[1]..[int]$Matches[2] }
+        elseif ($p -match '^\d+$')         { $out += [int]$p }
+    }
+    $out | Where-Object { $_ -ge 1 -and $_ -le $Max } | Sort-Object -Unique
+}
+
+function Add-FindingIndex {
+    param([object[]]$Items)
+    $i = 0
+    foreach ($x in $Items) {
+        $i++
+        $x | Add-Member -NotePropertyName Id -NotePropertyValue $i -Force -PassThru
+    }
+}
+
+function Test-InsideWindowsDirectory {
+    # $true if $Path is (or is inside) any folder in $DeepNeverDeleteRoots. Fails closed: a path that can't
+    # be resolved is treated as protected.
+    param([string]$Path)
+    if (-not $Path) { return $true }
+
+    try {
+        # Strip \\?\ and \??\ prefixes, and turn \\localhost\C$\... admin-share paths into C:\...
+        $full = $Path -replace '^\\\\\?\\', '' -replace '^\\\?\?\\', ''
+        $uncAdmin = '^\\\\(?:localhost|127\.0\.0\.1|' + [regex]::Escape($env:COMPUTERNAME) + ')\\([A-Za-z])\$(?=\\|$)'
+        $full = $full -replace $uncAdmin, '$1:'
+        $full = [IO.Path]::GetFullPath($full).TrimEnd('\')
+    }
+    catch { return $true }
+
+    foreach ($root in $DeepNeverDeleteRoots) {
+        if ($full.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+            $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    $false
+}
+
+function Test-IsLink {
+    # $true for a junction or symbolic link (not for other reparse points such as cloud placeholders).
+    param($Item)
+    if (-not $Item) { return $false }
+    [bool](($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -and ("$($Item.LinkType)" -in 'Junction', 'SymbolicLink'))
+}
+
+function Get-LinkTargetPaths {
+    # Full path(s) a junction/symlink points to ($null-free; empty if the target can't be read).
+    param($Link)
+
+    $paths = @()
+    $raw   = @()
+    try { $raw = @($Link.Target) } catch { }
+
+    foreach ($t in $raw) {
+        if (-not $t) { continue }
+        $t = ("$t") -replace '^\\\\\?\\', '' -replace '^\\\?\?\\', ''
+        try {
+            if (-not [IO.Path]::IsPathRooted($t)) {
+                $t = Join-Path (Split-Path -Path $Link.FullName -Parent) $t
+            }
+            $paths += [IO.Path]::GetFullPath($t)
+        }
+        catch { $paths += $t }
+    }
+    $paths
+}
+
+function Test-LinkPointsIntoWindows {
+    # $true if a link targets the Windows directory, or if its target can't be determined (fail closed).
+    param($Link)
+
+    $targets = @(Get-LinkTargetPaths $Link)
+    if ($targets.Count -eq 0) { return $true }
+    foreach ($t in $targets) {
+        if (Test-InsideWindowsDirectory $t) { return $true }
+    }
+    $false
+}
+
+function Get-InnerLinks {
+    # Every junction/symbolic link inside $Path (or $Path itself if it is one). Walks the tree by hand and
+    # never follows a link, so it can't be led into another folder.
+    param([string]$Path)
+
+    $root = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $root) { return }
+    if (Test-IsLink $root) { $root; return }
+    if (-not $root.PSIsContainer) { return }
+
+    $stack = New-Object System.Collections.Generic.Stack[string]
+    $stack.Push($root.FullName)
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        foreach ($child in (Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue)) {
+            if (Test-IsLink $child)        { $child }
+            elseif ($child.PSIsContainer)  { $stack.Push($child.FullName) }
+        }
+    }
+}
+
+function Get-WindowsDirectoryRisk {
+    # Returns a reason (string) if deleting $Path could touch anything inside the Windows directory,
+    # otherwise $null.
+    param([string]$Path)
+
+    if (Test-InsideWindowsDirectory $Path) { return 'it is inside the Windows directory' }
+
+    # The path itself, or any parent folder, being a link into Windows
+    $p = $Path
+    while ($p) {
+        $item = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+        if ($item -and (Test-IsLink $item) -and (Test-LinkPointsIntoWindows $item)) {
+            return "'$p' is a link that points into (or can't be shown to stay out of) the Windows directory"
+        }
+        $parent = Split-Path -Path $p -Parent
+        if (-not $parent -or $parent -eq $p) { break }
+        $p = $parent
+    }
+
+    # Any link inside the folder that reaches into Windows
+    foreach ($link in @(Get-InnerLinks -Path $Path)) {
+        if (Test-LinkPointsIntoWindows $link) {
+            return "it contains a link ('$($link.FullName)') that points into (or can't be shown to stay out of) the Windows directory"
+        }
+    }
+
+    $null
+}
+
+function Remove-PathSafely {
+    # Deletes a file or folder tree without ever following a junction or symbolic link: links inside the
+    # tree are removed first (the link only, never its target), then the rest is deleted.
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    foreach ($link in @(Get-InnerLinks -Path $Path)) {
+        if ($link.PSIsContainer) { [System.IO.Directory]::Delete($link.FullName) }
+        else                     { [System.IO.File]::Delete($link.FullName) }
+    }
+
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+    }
+}
+
+function Test-ExcludedFinding {
+    # $true if a finding is one of the always-excluded items in $DeepExcludeNames: a service with that name,
+    # or any file/folder/registry/task path that has that name as one of its segments.
+    param($Item)
+
+    foreach ($name in $DeepExcludeNames) {
+        if ($Item.Type -eq 'Service' -and $Item.Path -ieq $name) { return $true }
+        if ($Item.Path) {
+            foreach ($segment in ($Item.Path -split '\\')) {
+                if ($segment -ieq $name) { return $true }
+            }
+        }
+    }
+    $false
+}
+
+function Stop-ImageRightForRemoval {
+    # Stops anything that could hold files open: ImageRight/Sagitta processes and the installer service.
+    $procs = Get-Process -Name 'ImageRight*', 'Sagitta*' -ErrorAction SilentlyContinue
+    if ($procs) {
+        Write-Info "Stopping processes: $((($procs | Select-Object -ExpandProperty Name -Unique) -join ', '))"
+        $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
+
+    $svc = Get-Service -Name $IRServiceName -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -ne 'Stopped') {
+        Write-Info "Stopping service '$IRServiceName'..."
+        Stop-Service -Name $IRServiceName -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-IRRemovalEntries {
+    # Every Add/Remove Programs entry for ImageRight or the Sagitta Launcher. No filtering on uninstall
+    # strings or system-component flags, because broken entries are exactly what this option is for.
+    Get-ItemProperty -Path $UninstallRegistryPaths -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -and ($_.DisplayName -like '*ImageRight*' -or $_.DisplayName -like $SagittaDisplayNamePattern) } |
+        Select-Object DisplayName, DisplayVersion, Publisher, InstallLocation,
+            @{ n = 'KeyName';     e = { $_.PSChildName } },
+            @{ n = 'RegistryKey'; e = { $_.PSPath -replace '^Microsoft\.PowerShell\.Core\\Registry::', '' } }
+}
+
+function Get-RemovalSearchTerms {
+    # The fixed terms plus names / install-folder names taken from the Add/Remove Programs entries.
+    param([object[]]$Entries)
+
+    $terms = @($DeepRemoveTerms)
+    foreach ($e in $Entries) {
+        $terms += Get-CleanName $e.DisplayName
+        if ($e.KeyName -and $e.KeyName -notmatch '^\{?[0-9A-Fa-f\-]{36}\}?') {
+            $terms += Get-CleanName ($e.KeyName -replace '_is1$', '')
+        }
+        if ($e.InstallLocation) {
+            $loc = $e.InstallLocation.Trim('"').TrimEnd('\')
+            if ($loc -and -not (Test-ProtectedPath $loc)) { $terms += Split-Path $loc -Leaf }
+        }
+    }
+    $terms | Where-Object { $_ -and $_.Length -ge 3 -and $DeepGenericTerms -notcontains $_ } |
+        Sort-Object -Unique
+}
+
+function Find-IRLeftovers {
+    param([object[]]$Entries, [string[]]$Terms, [string[]]$Publishers)
+
+    $findings = New-Object System.Collections.Generic.List[object]
+    $add = {
+        param($Type, $Path, $Reason, $TaskName, $TaskPath)
+        $findings.Add([pscustomobject]@{
+            Type = $Type; Path = $Path; Reason = $Reason; TaskName = $TaskName; TaskPath = $TaskPath
+        })
+    }
+
+    $pubs = @($Publishers | Where-Object { $_ -and $_.Length -ge 3 -and ($DeepGenericTerms -notcontains $_) } | Sort-Object -Unique)
+
+    # 1. Add/Remove Programs entries left behind
+    foreach ($e in $Entries) {
+        if ($e.RegistryKey -and (Test-Path -LiteralPath "Registry::$($e.RegistryKey)")) {
+            & $add 'Registry' $e.RegistryKey 'Add/Remove Programs entry'
+        }
+    }
+
+    # 2. Install folders (from the entries, plus the known ImageRight folders)
+    $locs = @()
+    foreach ($e in $Entries) {
+        if ($e.InstallLocation) {
+            $l = $e.InstallLocation.Trim('"').TrimEnd('\')
+            if ($l -and -not (Test-ProtectedPath $l)) { $locs += $l }
+        }
+    }
+    foreach ($f in $ForceRemoveFolders) {
+        if (-not (Test-ProtectedPath $f)) { $locs += $f }
+    }
+    $locs = @($locs | Sort-Object -Unique)
+    foreach ($l in $locs) {
+        if (Test-Path -LiteralPath $l) { & $add 'Folder' $l 'Install location / known ImageRight folder' }
+    }
+
+    # 3. Common file system locations (top level + one level under a publisher folder)
+    $fsRoots = @(
+        $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData,
+        $env:APPDATA, $env:LOCALAPPDATA, "$env:LOCALAPPDATA\Programs",
+        "$env:ProgramData\Microsoft\Windows\Start Menu\Programs",
+        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
+        [Environment]::GetFolderPath('Desktop'), "$env:PUBLIC\Desktop"
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Sort-Object -Unique
+
+    foreach ($root in $fsRoots) {
+        foreach ($child in (Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue)) {
+            $n    = if ($child.PSIsContainer) { $child.Name } else { $child.BaseName }
+            $type = if ($child.PSIsContainer) { 'Folder' } else { 'File' }
+            if (Test-NameMatch $n $Terms) {
+                if (-not (Test-ProtectedPath $child.FullName)) { & $add $type $child.FullName "Name match in $root" }
+            }
+            elseif ($child.PSIsContainer -and ($pubs -contains $child.Name)) {
+                foreach ($sub in (Get-ChildItem -LiteralPath $child.FullName -Force -ErrorAction SilentlyContinue)) {
+                    $sn    = if ($sub.PSIsContainer) { $sub.Name } else { $sub.BaseName }
+                    $stype = if ($sub.PSIsContainer) { 'Folder' } else { 'File' }
+                    if (Test-NameMatch $sn $Terms) { & $add $stype $sub.FullName "Under publisher folder '$($child.Name)'" }
+                }
+            }
+        }
+    }
+
+    # 4. Registry (direct children of SOFTWARE, plus Publisher\Product)
+    $regRoots = 'HKEY_LOCAL_MACHINE\SOFTWARE', 'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node', 'HKEY_CURRENT_USER\Software'
+    foreach ($r in $regRoots) {
+        foreach ($key in (Get-ChildItem -LiteralPath "Registry::$r" -ErrorAction SilentlyContinue)) {
+            if (Test-NameMatch $key.PSChildName $Terms) {
+                & $add 'Registry' $key.Name "Key name match under $r"
+            }
+            elseif ($pubs -contains $key.PSChildName) {
+                foreach ($sub in (Get-ChildItem -LiteralPath $key.PSPath -ErrorAction SilentlyContinue)) {
+                    if (Test-NameMatch $sub.PSChildName $Terms) { & $add 'Registry' $sub.Name "Under publisher key '$($key.PSChildName)'" }
+                }
+            }
+        }
+    }
+
+    # 5. Windows Installer product registrations. If these survive, a later reinstall can think the
+    #    product is still installed (exit 1638 / maintenance mode) even though the files are gone.
+    $installerProducts = 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes\Installer\Products'
+    foreach ($key in (Get-ChildItem -LiteralPath $installerProducts -ErrorAction SilentlyContinue)) {
+        $productName = (Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue).ProductName
+        if (Test-NameMatch $productName $Terms) {
+            $packed = $key.PSChildName
+            & $add 'Registry' $key.Name "Windows Installer registration for '$productName'"
+            foreach ($rel in @(
+                "HKEY_LOCAL_MACHINE\SOFTWARE\Classes\Installer\Features\$packed",
+                "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products\$packed"
+            )) {
+                if (Test-Path -LiteralPath "Registry::$rel") { & $add 'Registry' $rel "Windows Installer data for '$productName'" }
+            }
+        }
+    }
+
+    # 6. Services
+    foreach ($svc in (Get-CimInstance Win32_Service -ErrorAction SilentlyContinue)) {
+        $hit = (Test-NameMatch $svc.Name $Terms) -or (Test-NameMatch $svc.DisplayName $Terms)
+        if (-not $hit -and $svc.PathName) {
+            foreach ($l in $locs) {
+                if ($svc.PathName.IndexOf($l, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit = $true; break }
+            }
+        }
+        if ($hit) { & $add 'Service' $svc.Name "Service '$($svc.DisplayName)' -> $($svc.PathName)" }
+    }
+
+    # 7. Scheduled tasks (skips Microsoft's own task folders)
+    foreach ($task in (Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+        if ($task.TaskPath -like '\Microsoft\*') { continue }
+        $hit = Test-NameMatch $task.TaskName $Terms
+        if (-not $hit) {
+            foreach ($a in $task.Actions) {
+                if (-not $a.Execute) { continue }
+                foreach ($l in $locs) {
+                    if ($a.Execute.IndexOf($l, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit = $true; break }
+                }
+            }
+        }
+        if ($hit) { & $add 'ScheduledTask' "$($task.TaskPath)$($task.TaskName)" 'Task name or action match' $task.TaskName $task.TaskPath }
+    }
+
+    # De-duplicate, and drop items already covered by a flagged parent folder/key
+    $unique = @($findings | Group-Object { "$($_.Type)|$($_.Path)" } | ForEach-Object { $_.Group[0] })
+    $result = foreach ($f in $unique) {
+        $parent = $unique | Where-Object {
+            ($_.Type -eq 'Folder' -or $_.Type -eq 'Registry') -and
+            $f.Path.StartsWith($_.Path + '\', [StringComparison]::OrdinalIgnoreCase)
+        }
+        if (-not $parent) { $f }
+    }
+    @($result)
+}
+
+function Get-DeepRemovalFindings {
+    # Stops the running apps, builds the search terms, scans, and returns the indexed findings
+    # (nothing is returned when there are no findings).
+    Write-Warn "This option does NOT run the applications' own uninstallers. Use it only when option 3 could not remove them."
+    Write-Info "Safety: nothing inside C:\Windows (or reached through a link into it) is ever deleted."
+    Stop-ImageRightForRemoval
+
+    $entries = @(Get-IRRemovalEntries)
+    if ($entries.Count -gt 0) {
+        Write-Info "Add/Remove Programs entries found ($($entries.Count)):"
+        foreach ($e in $entries) { Write-Info "  $($e.DisplayName) $($e.DisplayVersion)" }
+    }
+    else {
+        Write-Info "No ImageRight or Sagitta Launcher entries in Add/Remove Programs (scanning by name only)."
+    }
+
+    $terms      = @(Get-RemovalSearchTerms -Entries $entries)
+    $publishers = @($entries | ForEach-Object { Get-CleanPublisher $_.Publisher } | Where-Object { $_ } | Sort-Object -Unique)
+    Write-Info "Search terms: $($terms -join ' | ')$(if ($publishers) { '   Publisher: ' + ($publishers -join ', ') })"
+
+    Write-Info "Scanning files, folders, registry, Windows Installer data, services, and scheduled tasks..."
+    $found = @(Find-IRLeftovers -Entries $entries -Terms $terms -Publishers $publishers)
+
+    # Never list or offer the always-excluded items (see $DeepExcludeNames)
+    foreach ($f in @($found | Where-Object { Test-ExcludedFinding $_ })) {
+        Write-Verbose "Excluded (always): [$($f.Type)] $($f.Path)"
+    }
+    $found = @($found | Where-Object { -not (Test-ExcludedFinding $_) })
+
+    # Scheduled tasks are stored as files under C:\Windows\System32\Tasks, which this option never
+    # modifies, so matching tasks are only listed for manual removal.
+    $taskFindings = @($found | Where-Object { $_.Type -eq 'ScheduledTask' })
+    $found        = @($found | Where-Object { $_.Type -ne 'ScheduledTask' })
+    if ($taskFindings.Count -gt 0) {
+        Write-Warn "Scheduled task(s) matched but will NOT be removed (their definitions are stored inside C:\Windows, which this option never modifies):"
+        foreach ($t in $taskFindings) { Write-Info "  $($t.Path)   [$($t.Reason)]" }
+        Write-Info "  To remove one yourself: Unregister-ScheduledTask -TaskName '<name>' -Confirm:`$false"
+    }
+
+    # Never offer anything inside (or reaching into) the Windows directory
+    $safe = @()
+    foreach ($f in $found) {
+        $risk = $null
+        if ($f.Type -in 'Folder', 'File') { $risk = Get-WindowsDirectoryRisk -Path $f.Path }
+
+        if ($risk) { Write-Warn "Excluded (protected): [$($f.Type)] $($f.Path) - $risk" }
+        else       { $safe += $f }
+    }
+    $found = @($safe)
+
+    if ($found.Count -eq 0) { return }
+
+    Add-FindingIndex $found
+}
+
+function Select-LeftoverItems {
+    # Console review: lists the findings (nothing is pre-selected) and returns the ones the user picks.
+    param([object[]]$Items, [string]$Title)
+
+    $Items = @($Items)
+    Write-Host ""
+    Write-Host $Title -ForegroundColor Cyan
+    $Items | Select-Object Id, Type, Path, Reason | Format-Table -AutoSize -Wrap | Out-String -Width 220 | Write-Host
+
+    $answer = Read-Host "Enter Ids to DELETE (e.g. 1,3,5-7), 'all', or blank for none"
+    $ids = @(ConvertFrom-Selection $answer $Items.Count)
+    $Items | Where-Object { $ids -contains $_.Id }
+}
+
+function Remove-LeftoverItems {
+    # Permanently deletes the selected findings (no backup). Sets $script:DeepRemovedCount, DeepSkippedCount
+    # and DeepFailedCount. Nothing inside the Windows directory is ever deleted: every folder/file is
+    # re-checked right before it is touched, and items that fail the check are skipped.
+    param([object[]]$Items)
+
+    $script:DeepRemovedCount = 0
+    $script:DeepSkippedCount = 0
+    $script:DeepFailedCount  = 0
+
+    # Services first (they can hold files open), then folders/files, then registry
+    $order = @{ 'Service' = 1; 'Folder' = 2; 'File' = 3; 'Registry' = 4 }
+
+    foreach ($item in @($Items | Sort-Object { $order[$_.Type] })) {
+        try {
+            $blocked = $null
+            if ($item.Type -in 'Folder', 'File') { $blocked = Get-WindowsDirectoryRisk -Path $item.Path }
+
+            if ($blocked) {
+                Write-Warn "SKIPPED (protected): [$($item.Type)] $($item.Path) - $blocked"
+                $script:DeepSkippedCount++
+                continue
+            }
+
+            if (Test-ExcludedFinding $item) {
+                Write-Warn "SKIPPED (always excluded): [$($item.Type)] $($item.Path)"
+                $script:DeepSkippedCount++
+                continue
+            }
+
+            $handled = $true
+            switch ($item.Type) {
+                { $_ -in 'Folder', 'File' } {
+                    Write-Info "Deleting [$($item.Type)] $($item.Path)"
+                    for ($attempt = 1; $attempt -le $ForceRemoveRetries; $attempt++) {
+                        try {
+                            Remove-PathSafely -Path $item.Path
+                            break
+                        }
+                        catch {
+                            if ($attempt -ge $ForceRemoveRetries) { throw }
+                            Write-Warn "In use (attempt $attempt of $ForceRemoveRetries): $($_.Exception.Message) Retrying in $ForceRemoveDelaySeconds seconds."
+                            Start-Sleep -Seconds $ForceRemoveDelaySeconds
+                        }
+                    }
+                }
+                'Registry' {
+                    Write-Info "Deleting [Registry] $($item.Path)"
+                    Remove-Item -LiteralPath "Registry::$($item.Path)" -Recurse -Force -ErrorAction Stop
+                }
+                'Service' {
+                    Write-Info "Stopping and deleting [Service] $($item.Path)"
+                    Stop-Service -Name $item.Path -Force -ErrorAction SilentlyContinue
+                    & sc.exe delete $item.Path | Out-Null
+                    if ($LASTEXITCODE -ne 0) { throw "sc.exe delete failed (exit $LASTEXITCODE)" }
+                }
+                default {
+                    # Anything else (including scheduled tasks) is never removed by this option
+                    $handled = $false
+                    Write-Warn "SKIPPED: this option does not remove items of type '$($item.Type)': $($item.Path)"
+                    $script:DeepSkippedCount++
+                }
+            }
+
+            if ($handled) { $script:DeepRemovedCount++ }
+        }
+        catch {
+            Write-Warn "Failed: [$($item.Type)] $($item.Path) - $($_.Exception.Message)"
+            $script:DeepFailedCount++
+        }
+    }
+}
+
+# ----------------------------------------------------------------------------
 # Run-mode menu
 # ----------------------------------------------------------------------------
 function Test-InteractiveSession {
@@ -1918,7 +2523,7 @@ function Show-ConfigMenu {
 }
 
 function Show-ModeMenu {
-    # Returns '1', '2', '3', '4', '5.1' (config update THGx), '5.2' (config update RIV), or '0' (quit).
+    # Returns '1', '2', '3', '4', '5.1' (config update THGx), '5.2' (config update RIV), '6', or '0' (quit).
     while ($true) {
         Write-Host ""
         Write-Host "================================================================" -ForegroundColor Cyan
@@ -1929,6 +2534,7 @@ function Show-ModeMenu {
         Write-Host "  3) Uninstall IR and Cleanup"
         Write-Host "  4) IR Configuration Check"
         Write-Host "  5) IR Configuration Update"
+        Write-Host "  6) Destructive Removal of IR (use only if option 3 fails)"
         Write-Host "  Q) Quit"
         Write-Host ""
 
@@ -1942,8 +2548,9 @@ function Show-ModeMenu {
                 $sub = Show-ConfigMenu
                 if ($sub) { return $sub }
             }
+            '^6$'     { return '6' }
             '^[Qq]$'  { return '0' }
-            default   { Write-Warn "'$choice' is not a valid selection. Enter 1, 2, 3, 4, 5, or Q." }
+            default   { Write-Warn "'$choice' is not a valid selection. Enter 1, 2, 3, 4, 5, 6, or Q." }
         }
     }
 }
@@ -2039,6 +2646,9 @@ function Invoke-RunMode {
     $script:RebootRequired        = $false
     $script:PatchFailureCount     = 0
     $script:UninstallFailureCount = 0
+    $script:DeepRemovedCount      = 0
+    $script:DeepSkippedCount      = 0
+    $script:DeepFailedCount       = 0
     $script:BitsDisabled          = $false
     $script:RunStamp              = Get-Date -Format 'yyyyMMdd_HHmmss'
     $script:TotalSteps            = 9
@@ -2058,16 +2668,24 @@ function Invoke-RunMode {
         return
     }
 
+    # Option 6 deletes things by name, so a person must review the findings first
+    if ($RunMode -eq 6 -and -not (Test-InteractiveSession)) {
+        Write-Host "Option 6 (destructive removal) needs an interactive session so the findings can be reviewed before anything is deleted. Nothing was changed." -ForegroundColor Red
+        return
+    }
+
     $UpdateOnly    = ($RunMode -eq 1)
     $UninstallOnly = ($RunMode -eq 3)
     $CheckOnly     = ($RunMode -eq 4)
     $ConfigUpdate  = ($RunMode -eq 5)
+    $DeepRemove    = ($RunMode -eq 6)
     $ModeLabel = switch ($RunMode) {
         1 { 'Option 1 - Apply IR25R1 updates' }
         2 { 'Option 2 - Install IR25R1 and update' }
         3 { 'Option 3 - Force uninstall ImageRight and Sagitta Launcher' }
         4 { 'Option 4 - IR Configuration Check' }
         5 { "Option $Selected - IR Configuration Update ($ConfigProfile)" }
+        6 { 'Option 6 - Destructive removal of ImageRight and Sagitta Launcher' }
     }
     if ($UpdateOnly) {
         $script:TotalSteps  = 2
@@ -2083,6 +2701,10 @@ function Invoke-RunMode {
         $script:CleanupStep = 2
     }
     elseif ($ConfigUpdate) {
+        $script:TotalSteps  = 4
+        $script:CleanupStep = 4
+    }
+    elseif ($DeepRemove) {
         $script:TotalSteps  = 4
         $script:CleanupStep = 4
     }
@@ -2156,6 +2778,41 @@ function Invoke-RunMode {
             else {
                 Write-Ok "ImageRight configuration updated to $ConfigProfile."
                 $ExitCode = 0
+            }
+        }
+        elseif ($DeepRemove) {
+            Write-Step 2 'Scanning for ImageRight and Sagitta Launcher remnants'
+            $deepFindings = @(Get-DeepRemovalFindings)
+
+            if ($deepFindings.Count -eq 0) {
+                Write-Ok "No ImageRight or Sagitta Launcher remnants were found."
+                $ExitCode = 0
+            }
+            else {
+                Write-Step 3 'Reviewing findings'
+                $deepSelected = @(Select-LeftoverItems -Items $deepFindings -Title "Remnants of ImageRight and the Sagitta Launcher - select ONLY items you're sure about")
+
+                if ($deepSelected.Count -eq 0) {
+                    Write-Info "Nothing selected. No changes made."
+                    $ExitCode = 0
+                }
+                else {
+                    Write-Step 4 'Removing selected items'
+                    Remove-LeftoverItems -Items $deepSelected
+
+                    if ($script:DeepSkippedCount -gt 0) {
+                        Write-Warn "$($script:DeepSkippedCount) selected item(s) were skipped because they are protected (inside the Windows directory or linked into it)."
+                    }
+
+                    if ($script:DeepFailedCount -gt 0) {
+                        Write-Warn "Removed $($script:DeepRemovedCount) item(s); $($script:DeepFailedCount) failed. Locked items may need a reboot and a second run."
+                        $ExitCode = 1
+                    }
+                    else {
+                        Write-Ok "Removed $($script:DeepRemovedCount) item(s)."
+                        $ExitCode = 0
+                    }
+                }
             }
         }
         elseif ($UninstallOnly) {
@@ -2258,13 +2915,13 @@ function Invoke-RunMode {
         $ExitCode = 1
     }
     finally {
-        # Options 1, 4, and 5 print no cleanup or closing summary lines. Option 5 still removes its downloaded
+        # Options 1, 4, 5, and 6 print no cleanup or closing summary lines. Option 5 still removes its downloaded
         # package here, quietly (only a failure to remove it is reported).
         if ($ConfigUpdate) {
             Remove-ConfigPackage
         }
 
-        if (-not ($UpdateOnly -or $CheckOnly -or $ConfigUpdate)) {
+        if (-not ($UpdateOnly -or $CheckOnly -or $ConfigUpdate -or $DeepRemove)) {
             Write-Step $script:CleanupStep 'Cleaning up temporary files'
             if ($UninstallOnly) {
                 Write-Info "No installer files were used in this mode."
