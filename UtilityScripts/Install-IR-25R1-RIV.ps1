@@ -53,7 +53,7 @@
     .\Install-ImageRight25R1.ps1 -ForceUninstall
 
 .NOTES
-    Version      : 1.5.0
+    Version      : 1.5.1
     Baseline date: 2026-10-12
     Target       : ImageRight 25R1 (Vertafore)
 
@@ -137,6 +137,8 @@
                          The installer service is stopped first and locked files are retried.
       1.5.0  2026-11-04  Added -Silent: no console output; all output is written to a log file in the same folder
                          as the other logs. All console writes now go through Write-Console.
+      1.5.1  2026-11-04  Uninstall logs are now named after the application (Uninstall_<ApplicationName>.log, e.g.
+                         Uninstall_ImageRightDesktop.log) instead of the product code GUID.
 #>
 
 [CmdletBinding()]
@@ -743,13 +745,25 @@ function Uninstall-ImageRight {
     }
 
     $i = 0
+    $usedLogNames = @{}
     foreach ($item in $msiProducts) {
         $i++
         $productCode = $item.PSChildName
         $label = "Uninstalling '$($item.DisplayName)' $($item.DisplayVersion) ($i of $(@($msiProducts).Count))"
         Write-Info "$label ..."
 
-        $logFile = Join-Path $MsiLogFolder ("Uninstall_{0}.log" -f ($productCode -replace '[{}]', ''))
+        # Name the log after the application (letters and digits only, same as the install logs). Fall back to the
+        # product code if the name has nothing usable, and add _2, _3, ... if two entries share a name.
+        $safeName = $item.DisplayName -replace '[^A-Za-z0-9]', ''
+        if ([string]::IsNullOrEmpty($safeName)) { $safeName = $productCode -replace '[^A-Za-z0-9]', '' }
+        if ($usedLogNames.ContainsKey($safeName)) {
+            $usedLogNames[$safeName]++
+            $safeName = '{0}_{1}' -f $safeName, $usedLogNames[$safeName]
+        }
+        else {
+            $usedLogNames[$safeName] = 1
+        }
+        $logFile = Join-Path $MsiLogFolder "Uninstall_$safeName.log"
         $msiArgs = @('/x', "`"$productCode`"", '/qn', '/norestart', "/l*v `"$logFile`"")
 
         # 1605 = product not installed (stale entry) - treat as OK
