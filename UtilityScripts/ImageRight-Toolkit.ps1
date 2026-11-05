@@ -142,7 +142,9 @@
         Scanner, Configuration Editor), is also looked up in Add/Remove Programs by the AppName in
         $IRConfigFiles and reported as YES or NO (the config file has its own line, so the app line says
         nothing about it). A companion app that is installed but has no config file is flagged on the config
-        line but does not fail the check; a missing core config always fails. It
+        line but does not fail the check; a missing core config always fails. A config with a RequiredText
+        (AMS360Link.exe.config) is checked for that literal text instead of a database string and reported
+        as "AMS360 Pointer" (FOUND / NOT FOUND). It
         does not close ImageRight and prints only the check report (no cleanup or closing summary lines).
         Exit 0 = pass, 1 = any issue.
       - Option 5 (config update, 5.1 THGx / 5.2 RIV) downloads the config package ($ConfigPackageUrl, BITS
@@ -256,7 +258,12 @@
                          $IRConfigFiles), with separate "Core apps" and "Companion apps" summaries; pass/fail rules
                          are unchanged. Menu titles: 1 = Apply ImageRight 25R1 Updates, 2 = Install ImageRight 25R1 and
                          Updates, 3 = Uninstall ImageRight, 4 = ImageRight Config Check, 5 = ImageRight Config
-                         Update, 6 = Destructive ImageRight Removal.
+                         Update, 6 = Destructive ImageRight Removal. The config checker and config update also
+                         cover AMS360Link.exe.config (C:\ProgramData\ImageRight\Integration), the secondary config
+                         that accompanies AMS360Link.config. It has no database string, so the checker verifies the
+                         file is present and contains the text
+                         <value>C:\ProgramData\ImageRight\Integration\AMS360Link.config</value> instead, reported
+                         as "AMS360 Pointer".
 #>
 
 [CmdletBinding()]
@@ -364,12 +371,16 @@ $ConfigPackageFolders = @{
 
 # Required = core app; its config must exist on all devices. Optional = companion app config. AppName = the Add/Remove
 # Programs name of the app (wildcards ok), used to report whether the app is installed. (AMS360 Link is an integration
-# installed with the Front End Integration app, so it uses that app's name.)
+# installed with the Front End Integration app, so it uses that app's name; the same goes for its secondary
+# AMS360Link.exe.config.)
+# RequiredText = a literal string the file must contain. A config with RequiredText is checked for that text instead of
+# a database string (use it for files that don't point to a database).
 $IRConfigFiles = @(
     [PSCustomObject]@{ Name = 'ImageRight Desktop';              Required = $true;  AppName = 'ImageRight Desktop'; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.desktop.exe.config' }
     [PSCustomObject]@{ Name = 'ImageRight Installer Service';    Required = $true;  AppName = 'ImageRight Installer Service'; Path = 'C:\Program Files (x86)\ImageRight\InstallerService\IRInstallerService.exe.config' }
     [PSCustomObject]@{ Name = 'ImageRight Connect';              Required = $true;  AppName = 'ImageRight Connect'; Path = 'C:\Program Files (x86)\ImageRight\IRConnect\ImageRight.Connect.exe.config' }
     [PSCustomObject]@{ Name = 'ImageRight AMS360 Link';          Required = $true;  AppName = 'ImageRight Front End Integration'; Path = 'C:\ProgramData\ImageRight\Integration\AMS360Link.config' }
+    [PSCustomObject]@{ Name = 'ImageRight AMS360 Link (exe config)'; Required = $true;  AppName = 'ImageRight Front End Integration'; Path = 'C:\ProgramData\ImageRight\Integration\AMS360Link.exe.config'; RequiredText = '<value>C:\ProgramData\ImageRight\Integration\AMS360Link.config</value>' }
     [PSCustomObject]@{ Name = 'ImageRight EMC';                  Required = $false; AppName = 'Imageright Enterprise Management Console'; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.emc.exe.config' }
     [PSCustomObject]@{ Name = 'ImageRight Workflow Studio';      Required = $false; AppName = 'ImageRight Workflow Studio'; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.workflow.studio.exe.config' }
     [PSCustomObject]@{ Name = 'ImageRight Scanner';              Required = $false; AppName = 'ImageRight Scanner'; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.scanner.exe.config' }
@@ -1733,11 +1744,18 @@ function Test-ImageRightConfigs {
             $AppDetected = [bool]$AppEntry
         }
 
+        $TextFound = $false
         if ($Exists) {
             try {
-                foreach ($Key in $ConfigDatabases.Keys) {
-                    if (Select-String -LiteralPath $File -Pattern $Key -SimpleMatch -Quiet -ErrorAction Stop) {
-                        $Found += $ConfigDatabases[$Key]
+                if ($Config.RequiredText) {
+                    # No database in this file: just confirm the required text is inside it (literal, case-insensitive)
+                    $TextFound = [bool](Select-String -LiteralPath $File -Pattern $Config.RequiredText -SimpleMatch -Quiet -ErrorAction Stop)
+                }
+                else {
+                    foreach ($Key in $ConfigDatabases.Keys) {
+                        if (Select-String -LiteralPath $File -Pattern $Key -SimpleMatch -Quiet -ErrorAction Stop) {
+                            $Found += $ConfigDatabases[$Key]
+                        }
                     }
                 }
                 $ReadOK = $true
@@ -1768,13 +1786,25 @@ function Test-ImageRightConfigs {
                 Write-Host "   Config Present   : NO (companion app not installed)" -ForegroundColor DarkGray
                 $Status = "NotInstalled"
             }
-            Write-Host "   Database Found   : N/A" -ForegroundColor DarkGray
+            if ($Config.RequiredText) { Write-Host "   AMS360 Pointer   : N/A" -ForegroundColor DarkGray }
+            else                      { Write-Host "   Database Found   : N/A" -ForegroundColor DarkGray }
         }
         else {
             Write-Host "   Config Present   : YES" -ForegroundColor Green
             if (-not $ReadOK) {
-                Write-Host "   Database Found   : ERROR - $Note" -ForegroundColor Yellow
+                if ($Config.RequiredText) { Write-Host "   AMS360 Pointer   : ERROR - $Note" -ForegroundColor Yellow }
+                else                      { Write-Host "   Database Found   : ERROR - $Note" -ForegroundColor Yellow }
                 $Status = "Unreadable"
+            }
+            elseif ($Config.RequiredText) {
+                if ($TextFound) {
+                    Write-Host "   AMS360 Pointer   : FOUND" -ForegroundColor Green
+                    $Status = "TextFound"
+                }
+                else {
+                    Write-Host "   AMS360 Pointer   : NOT FOUND ($($Config.RequiredText))" -ForegroundColor Red
+                    $Status = "TextMissing"
+                }
             }
             elseif ($Found.Count -eq 1) {
                 Write-Host "   Database Found   : $($Found[0])" -ForegroundColor Green
@@ -1826,10 +1856,15 @@ function Test-ImageRightConfigs {
     if ($ReadErrors)   { Write-Host "  Unreadable files        : $ReadErrors"   -ForegroundColor Yellow }
     $AppNoConfig = @($Results | Where-Object { $_.Database -eq "ConfigMissing" }).Count
     if ($AppNoConfig)  { Write-Host "  Installed app, no config: $AppNoConfig"  -ForegroundColor Yellow }
+    $TextOk  = @($Results | Where-Object { $_.Database -eq "TextFound" }).Count
+    $TextBad = @($Results | Where-Object { $_.Database -eq "TextMissing" }).Count
+    if ($TextOk)       { Write-Host "  AMS360 pointer found    : $TextOk"       -ForegroundColor Green }
+    if ($TextBad)      { Write-Host "  AMS360 pointer missing  : $TextBad"      -ForegroundColor Red }
 
     # Apps: installed or not (core apps first, then companion apps)
     foreach ($Group in @(@{ Title = 'Core apps'; Required = $true }, @{ Title = 'Companion apps'; Required = $false })) {
-        $GroupApps = @($Results | Where-Object { $_.AppName -and ($_.Required -eq $Group.Required) })
+        $GroupApps = @($Results | Where-Object { $_.AppName -and ($_.Required -eq $Group.Required) } |
+            Group-Object AppName | ForEach-Object { $_.Group[0] })
         if ($GroupApps.Count -gt 0) {
             Write-Host ""
             Write-Host "$($Group.Title):" -ForegroundColor Cyan
@@ -1849,7 +1884,7 @@ function Test-ImageRightConfigs {
     }
 
     # Pass = no required files missing, and every present file maps to at least one known database
-    $PassStatuses = @($ConfigDatabases.Values) + "Multiple" + "NotInstalled" + "ConfigMissing"
+    $PassStatuses = @($ConfigDatabases.Values) + "Multiple" + "NotInstalled" + "ConfigMissing" + "TextFound"
     $Failures = @($Results | Where-Object { $PassStatuses -notcontains $_.Database }).Count
 
     Write-Host ""
