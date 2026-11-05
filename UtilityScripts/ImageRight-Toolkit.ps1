@@ -16,15 +16,19 @@
       Option 5 - ImageRight Config Update            : downloads the config package and replaces the present config
                                                        files with the chosen set, then re-checks them:
                                                          5.1 = THGx      5.2 = RIV
-      Option 6 - Destructive ImageRight Removal      : LAST RESORT for when option 3 cannot remove the apps. Does NOT run
+      Option 6 - ImageRight Permissions Check        : checks that BUILTIN\Users (S-1-5-32-545) has Full Control on
+                                                       'C:\Program Files (x86)\ImageRight' and 'C:\ProgramData\ImageRight' and,
+                                                       if not, applies it (same logic as the install flow). Nothing
+                                                       changes when the permission is already there.
+      Option 7 - Destructive ImageRight Removal      : LAST RESORT for when option 3 cannot remove the apps. Does NOT run
                                                        their uninstallers. Scans for ImageRight and Sagitta Launcher
                                                        files, folders, registry keys, Windows Installer registrations,
                                                        and services, lets you pick which findings to delete, then
                                                        permanently deletes them. NEVER deletes anything inside C:\Windows
                                                        or any of its subfolders. Interactive only.
-    For automation, pass -Option 1, 2, 3, 4, 5.1, or 5.2 to skip the menu. If no -Option is given and the
-    session is not interactive (no one to answer a prompt), option 2 is used; options 3, 5, and 6 are never
-    chosen by default. Option 6 refuses to run when not interactive, because the findings must be reviewed.
+    For automation, pass -Option 1, 2, 3, 4, 5.1, 5.2, 6, or 7 to skip the menu. If no -Option is given and the
+    session is not interactive (no one to answer a prompt), option 2 is used (no other option is ever chosen
+    by default). Option 7 refuses to run when not interactive, because the findings must be reviewed.
     In an interactive session the menu comes back after each option finishes and keeps coming back until Q
     is chosen. With -Option (or when not interactive) the script runs that one option and exits.
 
@@ -38,7 +42,7 @@
       4. Expand archive and confirm every MSI / config file exists
       5. Uninstall previous ImageRight MSI products (only after payload is verified)
       6. Install MSIs in required order (each logged)
-      7. Copy configs, restart installer service, apply folder permissions
+      7. Copy configs, restart installer service, apply folder permissions (both ImageRight folders)
       8. Apply the latest ImageRight patches (.msp) on every run: first detect which ImageRight apps are
          installed (if none, stop here without downloading anything), then discover the patches for those
          apps on the vendor release notes page, check this machine, and download, install, verify, and clean
@@ -52,7 +56,9 @@
                  of the last option that ran.
                  Option 3: exits 1 if any product failed to uninstall or any folder could not be fully deleted.
                  Options 4 and 5: 0 = every config passes the check, 1 = any config issue or update error.
-                 Option 6: 0 = nothing found, nothing selected, or everything selected was removed;
+                 Option 6: 0 = Users have Full Control on both folders (already, or after applying it),
+                 1 = a folder is missing or the permission could not be applied.
+                 Option 7: 0 = nothing found, nothing selected, or everything selected was removed;
                  1 = any selected item failed to delete, or the session was not interactive.
                  (in -TestBits mode: 0 = BITS test passed,  1 = BITS test failed)
 
@@ -63,8 +69,9 @@
     (read-only report), 5.1 = ImageRight Config Update with the THGx configs, 5.2 = ImageRight Config Update
     with the RIV configs.
     Plain 5 asks which configuration interactively and is rejected in a non-interactive session.
-    6 = Destructive removal of ImageRight and the Sagitta Launcher without running their uninstallers
-    (last resort after option 3 fails; interactive only).
+    6 = ImageRight Permissions Check (verifies BUILTIN\Users has Full Control on the two ImageRight folders
+    and applies it if missing), 7 = Destructive ImageRight Removal (removes ImageRight and the Sagitta
+    Launcher without running their uninstallers; last resort after option 3 fails; interactive only).
     If omitted, a menu is shown in an interactive session and returns after each option until Q is
     chosen; in a non-interactive session option 2 is used.
 
@@ -109,7 +116,8 @@
         A hash mismatch fails the download immediately (no retry). The hash must be updated whenever the
         installer package changes.
         If the hash is missing/invalid the script refuses to download (fails closed).
-      - BUILTIN\Users keeps FullControl on 'C:\Program Files (x86)\ImageRight' (Vertafore requirement).
+      - BUILTIN\Users keeps FullControl on 'C:\Program Files (x86)\ImageRight' and 'C:\ProgramData\ImageRight'
+        (Vertafore requirement); the install flow (option 2) applies it to both folders.
       - Install order of MSIs is critical and must not change.
       - Browser extension policy push is disabled ($InstallBrowserExtensions = $false).
       - Up-to-date threshold is $RequiredVersion (25.1.1.204).
@@ -117,12 +125,13 @@
     Run modes:
       - Interactive runs show a menu: 1 = Apply ImageRight 25R1 Updates, 2 = Install ImageRight 25R1 and
         Updates, 3 = Uninstall ImageRight, 4 = ImageRight Config Check, 5 = ImageRight Config Update
-        (then 1 = THGx or 2 = RIV), 6 = Destructive ImageRight Removal, Q = quit. The menu returns after
+        (then 1 = THGx or 2 = RIV), 6 = ImageRight Permissions Check, 7 = Destructive ImageRight Removal,
+        Q = quit. The menu returns after
         each option finishes and repeats until
         Q is chosen. State (reboot flag, failure counts, BITS fallback flag) is reset for every run, and the
         transcript in $TranscriptPath is appended to after the first run so earlier output is kept.
       - With -Option, or when not interactive, the script runs that one option and exits (no menu loop).
-      - -Option 1, 2, 3, 4, 5.1, 5.2, or 6 skip the menu for automation (Intune, SCCM, RMM). With no -Option and no
+      - -Option 1, 2, 3, 4, 5.1, 5.2, 6, or 7 skip the menu for automation (Intune, SCCM, RMM). With no -Option and no
         interactive console, option 2 is used, which matches how earlier versions behaved. Passing -Option
         explicitly in your deployment tool is recommended.
       - -TestBits is handled before the menu and never shows it.
@@ -157,7 +166,14 @@
         the package, in which case a note says so). ImageRight is not closed; a warning
         is shown if it is running, since new configs apply after it is restarted. Exit 0 = success, 1 = any
         update error or failed re-check.
-      - Option 6 (destructive removal) is the last resort when option 3 cannot uninstall the apps. It does
+      - Option 6 (permissions check) verifies that BUILTIN\Users (S-1-5-32-545) has an Allow Full Control
+        rule that applies to the folder, its subfolders, and its files on 'C:\Program Files (x86)\ImageRight'
+        and 'C:\ProgramData\ImageRight'. Where it is already present there is nothing to do. Where it is
+        missing, the same Set-IRFolderPermissions routine the install flow uses (option 2) grants it, and the
+        folder is re-checked. A folder that does not exist is reported and fails the check (nothing to apply).
+        ImageRight is not closed. Exit 0 = pass, 1 = any problem. It runs without prompts, so it works with
+        -Option 6 in non-interactive sessions.
+      - Option 7 (destructive removal) is the last resort when option 3 cannot uninstall the apps. It does
         NOT run any uninstaller. It stops ImageRight/Sagitta processes and the installer service, then scans
         for items whose names start with a term in $DeepRemoveTerms (plus names and install folders found in
         Add/Remove Programs) in: Program Files, ProgramData, AppData, Start Menu, and Desktop folders; the
@@ -170,7 +186,7 @@
         Limits: HKCU and AppData are scanned only for the account running the script, and other users'
         profiles are not scanned. Services are deleted with sc.exe (open handles may need a reboot). Exit 0 =
         nothing found / nothing selected / all removed, 1 = any failure.
-      - Windows directory protection (option 6): nothing inside C:\Windows, %windir%, %SystemRoot%, or any
+      - Windows directory protection (option 7): nothing inside C:\Windows, %windir%, %SystemRoot%, or any
         subfolder is ever deleted. This is enforced three times: (1) findings inside Windows are never
         offered; (2) each folder/file is re-checked immediately before deletion and skipped if it is inside
         Windows; (3) any junction or symbolic link that is the item, a parent of it, or inside it and points
@@ -179,7 +195,7 @@
         Unresolvable paths are treated as protected. Scheduled tasks are stored under
         C:\Windows\System32\Tasks, so matching tasks are only listed for manual removal. Services and
         registry keys are registry edits (not file deletions) and are still removed when selected.
-      - Always-excluded items (option 6): anything named in $DeepExcludeNames (currently SharedAccess and
+      - Always-excluded items (option 7): anything named in $DeepExcludeNames (currently SharedAccess and
         shpamsvc) is never listed or offered, whatever type it is (service, or any file, folder, or registry
         path with that name as a segment). Each selected item is also re-checked right before deletion.
 
@@ -243,7 +259,7 @@
                          and exit. Run logic moved into Invoke-RunMode with per-run state reset; the transcript is
                          appended after the first run. Quitting exits with the last run's exit code (0 if nothing
                          was run).
-      1.3.0  2026-11-04  Added option 6, Destructive ImageRight Removal, for when option 3 cannot uninstall the apps.
+      1.3.0  2026-11-04  Added option 7, Destructive ImageRight Removal, for when option 3 cannot uninstall the apps.
                          Built from the Revo-style deep uninstaller (leftover-only mode, no uninstaller run): scans
                          files, folders, registry, services, and Windows Installer product registrations by name,
                          shows the findings for selection (nothing pre-selected), and permanently deletes the chosen
@@ -258,17 +274,22 @@
                          $IRConfigFiles), with separate "Core apps" and "Companion apps" summaries; pass/fail rules
                          are unchanged. Menu titles: 1 = Apply ImageRight 25R1 Updates, 2 = Install ImageRight 25R1 and
                          Updates, 3 = Uninstall ImageRight, 4 = ImageRight Config Check, 5 = ImageRight Config
-                         Update, 6 = Destructive ImageRight Removal. The config checker and config update also
+                         Update, 6 = ImageRight Permissions Check, 7 = Destructive ImageRight Removal. The config
+                         checker and config update also
                          cover AMS360Link.exe.config (C:\ProgramData\ImageRight\Integration), the secondary config
                          that accompanies AMS360Link.config. It has no database string, so the checker verifies the
                          file is present and contains the text
                          <value>C:\ProgramData\ImageRight\Integration\AMS360Link.config</value> instead, reported
-                         as "AMS360 Pointer".
+                         as "AMS360 Pointer". Added option 6, ImageRight Permissions Check: verifies BUILTIN\Users
+                         (S-1-5-32-545) has Full Control on 'C:\Program Files (x86)\ImageRight' and
+                         'C:\ProgramData\ImageRight' and, where it is missing, applies it with the same logic as the
+                         install flow (Set-IRFolderPermissions now takes an optional -Path). Option 2 now applies the
+                         same permission to both ImageRight folders, including 'C:\ProgramData\ImageRight'.
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet('1', '2', '3', '4', '5', '5.1', '5.2', '6')][string]$Option,
+    [ValidateSet('1', '2', '3', '4', '5', '5.1', '5.2', '6', '7')][string]$Option,
     [switch]$TestBits,
     [switch]$SkipPatches
 )
@@ -290,6 +311,13 @@ $MsiLogFolder     = Join-Path $TempRoot 'ImageRightInstallLogs'
 $TranscriptPath   = Join-Path $TempRoot 'Debug.txt'
 $IRFolderPath     = 'C:\Program Files (x86)\ImageRight'
 $IRServiceName    = 'ImageRightInstallerService'
+
+# --- ImageRight folder permissions (option 6) ---
+$IRPermissionSid     = 'S-1-5-32-545'            # BUILTIN\Users must have Full Control on the folders below (Vertafore requirement)
+$IRPermissionFolders = @(
+    'C:\Program Files (x86)\ImageRight',
+    'C:\ProgramData\ImageRight'
+)
 $DownloadRetries  = 3
 $BitsJobName      = 'ImageRight25R1Download'
 $BitsNoProgressTimeoutSec = 120                  # Fail the BITS transfer if no bytes move for this long
@@ -387,7 +415,7 @@ $IRConfigFiles = @(
     [PSCustomObject]@{ Name = 'ImageRight Configuration Editor'; Required = $false; AppName = 'ImageRight Configuration Editor'; Path = 'C:\Program Files (x86)\ImageRight\Clients\imageright.configuration.editor.exe.config' }
 )
 
-# --- Destructive removal (option 6) ---
+# --- Destructive removal (option 7) ---
 # Name prefixes matched (case-insensitive) against files, folders, registry keys, services, and scheduled
 # tasks. Names and install folders found in Add/Remove Programs are added to these automatically.
 $DeepRemoveTerms = @('ImageRight', 'Sagitta Launcher')
@@ -411,11 +439,11 @@ $DeepProtectedPaths = @(
     [Environment]::GetFolderPath('Desktop')
 ) | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }
 
-# Option 6 must NEVER delete anything inside these folders (or any of their subfolders), whatever the scan finds.
+# Option 7 must NEVER delete anything inside these folders (or any of their subfolders), whatever the scan finds.
 $DeepNeverDeleteRoots = @('C:\Windows', $env:windir, $env:SystemRoot) |
     Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') } | Sort-Object -Unique
 
-# Option 6 never lists or removes these (core Windows items that must be left alone). Matched case-insensitively
+# Option 7 never lists or removes these (core Windows items that must be left alone). Matched case-insensitively
 # against a service's name and against each segment of a file, folder, or registry path.
 $DeepExcludeNames = @('SharedAccess', 'shpamsvc')
 
@@ -927,14 +955,18 @@ function Restart-ImageRightService {
 # works on any OS language.
 # ----------------------------------------------------------------------------
 function Set-IRFolderPermissions {
-    if (-not (Test-Path -LiteralPath $IRFolderPath)) {
-        throw "ImageRight folder does not exist: $IRFolderPath"
+    # Grants BUILTIN\Users Full Control on a folder (this folder, subfolders and files). With no -Path it uses the
+    # ImageRight program folder. The install flow (option 2) and option 6 pass each folder in $IRPermissionFolders.
+    param([string]$Path = $IRFolderPath)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "ImageRight folder does not exist: $Path"
     }
 
-    Write-Info "Granting BUILTIN\Users FullControl on $IRFolderPath (vendor requirement)..."
+    Write-Info "Granting BUILTIN\Users FullControl on $Path (vendor requirement)..."
 
-    $usersSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545')
-    $acl = Get-Acl -Path $IRFolderPath
+    $usersSid = New-Object System.Security.Principal.SecurityIdentifier($IRPermissionSid)
+    $acl = Get-Acl -LiteralPath $Path
 
     $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
         $usersSid,
@@ -945,7 +977,7 @@ function Set-IRFolderPermissions {
     )
 
     $acl.AddAccessRule($accessRule)
-    Set-Acl -Path $IRFolderPath -AclObject $acl
+    Set-Acl -LiteralPath $Path -AclObject $acl
     Write-Ok "Folder permissions applied."
 }
 
@@ -2029,7 +2061,102 @@ function Update-ImageRightConfigs {
 }
 
 # ----------------------------------------------------------------------------
-# Destructive removal (option 6)
+# ImageRight folder permissions check (option 6)
+# Verifies BUILTIN\Users (S-1-5-32-545) has Full Control on the ImageRight folders and applies it, with the same
+# logic as the install flow (Set-IRFolderPermissions), where it is missing.
+# ----------------------------------------------------------------------------
+function Test-UsersFullControl {
+    # Does the Users SID have an Allow Full Control rule on this folder that applies to the folder, its
+    # subfolders, and its files? Returns Exists / HasFullControl / Detail.
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return [pscustomobject]@{ Exists = $false; HasFullControl = $false; Detail = 'folder does not exist' }
+    }
+
+    $acl   = Get-Acl -LiteralPath $Path
+    $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) |
+        Where-Object { $_.IdentityReference.Value -eq $IRPermissionSid })
+
+    $full = [int][System.Security.AccessControl.FileSystemRights]::FullControl
+    $good = @($rules | Where-Object {
+        $_.AccessControlType -eq 'Allow' -and
+        (([int]$_.FileSystemRights -band $full) -eq $full) -and
+        (([int]$_.InheritanceFlags -band 3) -eq 3) -and       # ContainerInherit + ObjectInherit
+        (([int]$_.PropagationFlags -band 2) -eq 0)            # not InheritOnly
+    })
+
+    if ($good.Count -gt 0) {
+        return [pscustomobject]@{ Exists = $true; HasFullControl = $true; Detail = 'Full Control on this folder, subfolders and files' }
+    }
+
+    if ($rules.Count -eq 0) {
+        $detail = 'BUILTIN\Users has no entry'
+    }
+    else {
+        $detail = 'current: ' + (($rules | ForEach-Object { "$($_.AccessControlType) $($_.FileSystemRights) [$($_.InheritanceFlags)]" }) -join '; ')
+    }
+    [pscustomobject]@{ Exists = $true; HasFullControl = $false; Detail = $detail }
+}
+
+function Invoke-ImageRightPermissions {
+    # Checks each folder in $IRPermissionFolders. Where Users already have Full Control there is nothing to do;
+    # where they don't, applies it and re-checks. Sets $script:PermissionFailureCount (0 = pass).
+    $script:PermissionFailureCount = 0
+
+    Write-Host ""
+    Write-Host "ImageRight permissions check on $env:COMPUTERNAME" -ForegroundColor Cyan
+    Write-Host ("-" * 70)
+
+    foreach ($folder in $IRPermissionFolders) {
+        Write-Host ""
+        Write-Host $folder
+
+        $state = Test-UsersFullControl -Path $folder
+        if (-not $state.Exists) {
+            Write-Host "   Folder Present   : NO (nothing to apply - is ImageRight installed?)" -ForegroundColor Red
+            $script:PermissionFailureCount++
+            continue
+        }
+        Write-Host "   Folder Present   : YES" -ForegroundColor Green
+
+        if ($state.HasFullControl) {
+            Write-Host "   Full Control     : YES (BUILTIN\Users, $IRPermissionSid) - nothing to do" -ForegroundColor Green
+            continue
+        }
+
+        Write-Host "   Full Control     : NO ($($state.Detail))" -ForegroundColor Yellow
+        try {
+            Set-IRFolderPermissions -Path $folder
+
+            $after = Test-UsersFullControl -Path $folder
+            if ($after.HasFullControl) {
+                Write-Host "   Action           : APPLIED - BUILTIN\Users now has Full Control" -ForegroundColor Green
+            }
+            else {
+                Write-Host "   Action           : FAILED - the permission is still not present after applying ($($after.Detail))" -ForegroundColor Red
+                $script:PermissionFailureCount++
+            }
+        }
+        catch {
+            Write-Host "   Action           : FAILED - $($_.Exception.Message)" -ForegroundColor Red
+            $script:PermissionFailureCount++
+        }
+    }
+
+    Write-Host ""
+    Write-Host ("-" * 70)
+    if ($script:PermissionFailureCount -eq 0) {
+        Write-Host "RESULT: PASS" -ForegroundColor Green
+    }
+    else {
+        Write-Host "RESULT: FAIL ($($script:PermissionFailureCount) issue(s))" -ForegroundColor Red
+    }
+    Write-Host ""
+}
+
+# ----------------------------------------------------------------------------
+# Destructive removal (option 7)
 # Built from the Revo-style deep uninstaller in leftover-only mode: the applications' own uninstallers are
 # NOT run. Scans by name, shows the findings, and permanently deletes the ones you select.
 # ----------------------------------------------------------------------------
@@ -2588,7 +2715,7 @@ function Show-ConfigMenu {
 }
 
 function Show-ModeMenu {
-    # Returns '1', '2', '3', '4', '5.1' (config update THGx), '5.2' (config update RIV), '6', or '0' (quit).
+    # Returns '1', '2', '3', '4', '5.1' (config update THGx), '5.2' (config update RIV), '6', '7', or '0' (quit).
     while ($true) {
         Write-Host ""
         Write-Host "================================================================" -ForegroundColor Cyan
@@ -2599,7 +2726,8 @@ function Show-ModeMenu {
         Write-Host "  3) Uninstall ImageRight"
         Write-Host "  4) ImageRight Config Check"
         Write-Host "  5) ImageRight Config Update"
-        Write-Host "  6) Destructive ImageRight Removal"
+        Write-Host "  6) ImageRight Permissions Check"
+        Write-Host "  7) Destructive ImageRight Removal"
         Write-Host "  Q) Quit"
         Write-Host ""
 
@@ -2614,8 +2742,9 @@ function Show-ModeMenu {
                 if ($sub) { return $sub }
             }
             '^6$'     { return '6' }
+            '^7$'     { return '7' }
             '^[Qq]$'  { return '0' }
-            default   { Write-Warn "'$choice' is not a valid selection. Enter 1, 2, 3, 4, 5, 6, or Q." }
+            default   { Write-Warn "'$choice' is not a valid selection. Enter 1, 2, 3, 4, 5, 6, 7, or Q." }
         }
     }
 }
@@ -2713,6 +2842,7 @@ function Invoke-RunMode {
     $script:UninstallFailureCount = 0
     $script:DeepRemovedCount      = 0
     $script:DeepSkippedCount      = 0
+    $script:PermissionFailureCount = 0
     $script:DeepFailedCount       = 0
     $script:BitsDisabled          = $false
     $script:RunStamp              = Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -2733,9 +2863,9 @@ function Invoke-RunMode {
         return
     }
 
-    # Option 6 deletes things by name, so a person must review the findings first
-    if ($RunMode -eq 6 -and -not (Test-InteractiveSession)) {
-        Write-Host "Option 6 (destructive removal) needs an interactive session so the findings can be reviewed before anything is deleted. Nothing was changed." -ForegroundColor Red
+    # Option 7 deletes things by name, so a person must review the findings first
+    if ($RunMode -eq 7 -and -not (Test-InteractiveSession)) {
+        Write-Host "Option 7 (destructive removal) needs an interactive session so the findings can be reviewed before anything is deleted. Nothing was changed." -ForegroundColor Red
         return
     }
 
@@ -2743,14 +2873,16 @@ function Invoke-RunMode {
     $UninstallOnly = ($RunMode -eq 3)
     $CheckOnly     = ($RunMode -eq 4)
     $ConfigUpdate  = ($RunMode -eq 5)
-    $DeepRemove    = ($RunMode -eq 6)
+    $PermCheck     = ($RunMode -eq 6)
+    $DeepRemove    = ($RunMode -eq 7)
     $ModeLabel = switch ($RunMode) {
         1 { 'Option 1 - Apply ImageRight 25R1 Updates' }
         2 { 'Option 2 - Install ImageRight 25R1 and Updates' }
         3 { 'Option 3 - Uninstall ImageRight' }
         4 { 'Option 4 - ImageRight Config Check' }
         5 { "Option $Selected - ImageRight Config Update ($ConfigProfile)" }
-        6 { 'Option 6 - Destructive ImageRight Removal' }
+        6 { 'Option 6 - ImageRight Permissions Check' }
+        7 { 'Option 7 - Destructive ImageRight Removal' }
     }
     if ($UpdateOnly) {
         $script:TotalSteps  = 2
@@ -2773,6 +2905,10 @@ function Invoke-RunMode {
         $script:TotalSteps  = 4
         $script:CleanupStep = 4
     }
+    elseif ($PermCheck) {
+        $script:TotalSteps  = 2
+        $script:CleanupStep = 2
+    }
 
     $ExitCode = 1
     $transcriptStarted = $false
@@ -2792,7 +2928,7 @@ function Invoke-RunMode {
         }
 
         Write-Info "Script version $ScriptVersion. Mode: $ModeLabel"
-        if ($CheckOnly -or $ConfigUpdate) {
+        if ($CheckOnly -or $ConfigUpdate -or $PermCheck) {
             Write-Info "Running ImageRight applications are left open in this mode."
         }
         else {
@@ -2842,6 +2978,18 @@ function Invoke-RunMode {
             }
             else {
                 Write-Ok "ImageRight configuration updated to $ConfigProfile."
+                $ExitCode = 0
+            }
+        }
+        elseif ($PermCheck) {
+            Write-Step 2 'Checking ImageRight folder permissions'
+            Invoke-ImageRightPermissions
+
+            if ($script:PermissionFailureCount -gt 0) {
+                Write-Warn "The permissions check found $($script:PermissionFailureCount) problem(s). Exit code 1."
+                $ExitCode = 1
+            }
+            else {
                 $ExitCode = 0
             }
         }
@@ -2934,7 +3082,9 @@ function Invoke-RunMode {
                 Write-Step 7 'Applying configuration, service restart, and permissions'
                 Copy-ImageRightConfigs
                 Restart-ImageRightService
-                Set-IRFolderPermissions
+                foreach ($permFolder in $IRPermissionFolders) {
+                    Set-IRFolderPermissions -Path $permFolder
+                }
                 if ($InstallBrowserExtensions) {
                     Write-Info "Configuring browser extension policies..."
                     Install-BrowserExtensions
@@ -2980,13 +3130,13 @@ function Invoke-RunMode {
         $ExitCode = 1
     }
     finally {
-        # Options 1, 4, 5, and 6 print no cleanup or closing summary lines. Option 5 still removes its downloaded
+        # Options 1, 4, 5, 6, and 7 print no cleanup or closing summary lines. Option 5 still removes its downloaded
         # package here, quietly (only a failure to remove it is reported).
         if ($ConfigUpdate) {
             Remove-ConfigPackage
         }
 
-        if (-not ($UpdateOnly -or $CheckOnly -or $ConfigUpdate -or $DeepRemove)) {
+        if (-not ($UpdateOnly -or $CheckOnly -or $ConfigUpdate -or $DeepRemove -or $PermCheck)) {
             Write-Step $script:CleanupStep 'Cleaning up temporary files'
             if ($UninstallOnly) {
                 Write-Info "No installer files were used in this mode."
